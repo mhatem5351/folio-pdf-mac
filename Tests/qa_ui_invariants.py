@@ -68,6 +68,34 @@ def main() -> int:
     assert_contains(engine_src, "def cmd_block_at", "engine finds blocks at a click")
     assert_contains(engine_src, "def cmd_replace_block", "engine re-renders whole blocks")
 
+    # Escape cancels the block editor by EVERY route: the editor's own key
+    # handling, AppKit's cancel action, the PDF view, a key monitor that runs
+    # before the window can swallow the key, and the SwiftUI style panel.
+    assert_contains(preview_view, "override func cancelOperation", "editors answer AppKit's cancel action")
+    assert_contains(preview_view, "func cancelLiveEditors", "one place cancels every live editor")
+    assert_contains(preview_view, "if event.keyCode == 53, cancelLiveEditors()", "PDF view routes Escape to cancel")
+    assert_contains(preview_view, "addLocalMonitorForEvents", "Escape is caught before the window can swallow it")
+    assert_contains(preview_view, "blockEditor?.textView.abandon()", "cancel closes editors WITHOUT committing")
+    assert_contains(content_view, ".onExitCommand { store.cancelActiveEditing() }", "the style panel cancels on Escape")
+    assert_contains(app_store, "func cancelActiveEditing", "store exposes a cancel-everything entry point")
+
+    # Clicking away from an untouched block must never rewrite the document —
+    # but a dragged resize IS a change, even with the same text and style.
+    assert_contains(
+        app_store,
+        "guard textChanged || block.styleChanged || block.wasResized else {",
+        "unchanged block edits are a no-op",
+    )
+    assert_contains(app_store, "renderRect: block.resizedEngineRectString", "a resized block commits into its new box")
+    assert_contains(preview_view, "func handle(at point: NSPoint) -> ResizeHandle?", "frame handles are hit-testable, not decorative")
+    assert_contains(preview_view, "func resizedContentFrame", "the resized frame is read back for the commit")
+
+    # The Text style panel floats where the user parks it (it used to cover
+    # the very text being edited, top-right, and swallow clicks).
+    assert_contains(app_store, "var textPanelOffset", "panel position survives view updates")
+    assert_contains(content_view, "dragHeader(\"Text\")", "the panel header is the drag handle")
+    assert_contains(content_view, "func clampedOffset", "the panel stays inside the window")
+
     # Tool gating in the store.
     assert_contains(app_store, "guard selectedOperation == .edit, selectedEditTool == .contentText", "text replacement requires text tool")
     assert_contains(app_store, "guard selectedOperation == .edit, selectedEditTool == .grab", "region actions require grab tool")

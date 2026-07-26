@@ -68,6 +68,14 @@ struct ActiveTextBlock: Equatable {
     /// (empty = the whole block uses `colorHex`). Survives the async commit
     /// hop via the per-selectionID snapshot, like every other style field.
     var colorRuns: [ColorRun] = []
+    /// Set when the user dragged a resize handle on the editor frame: the box
+    /// the replacement text must reflow into (engine coords), which is NOT the
+    /// block's original rect. nil = never resized, render into `engineRect`.
+    var resizedEngineRect: CGRect?
+
+    /// A resize alone is a real edit — the paragraph has to re-wrap even when
+    /// neither the text nor the style changed.
+    var wasResized: Bool { resizedEngineRect != nil }
 
     var styleChanged: Bool {
         fontSize != originalFontSize || colorHex != originalColorHex
@@ -79,6 +87,10 @@ struct ActiveTextBlock: Equatable {
 
     var engineRectString: String {
         "\(engineRect.minX),\(engineRect.minY),\(engineRect.maxX),\(engineRect.maxY)"
+    }
+
+    var resizedEngineRectString: String? {
+        resizedEngineRect.map { "\($0.minX),\($0.minY),\($0.maxX),\($0.maxY)" }
     }
 }
 
@@ -214,7 +226,8 @@ final class AppStore: ObservableObject {
                     italic: block.italic, underline: block.underline,
                     alignment: block.alignment,
                     fontFamily: block.fontFamily, backgroundHex: block.backgroundHex,
-                    colorRuns: block.colorRuns
+                    colorRuns: block.colorRuns,
+                    resizedEngineRect: block.resizedEngineRect
                 )
                 pruneStyleSnapshots(&blockStyleBySelection, keep: block.selectionID)
             } else {
@@ -240,7 +253,7 @@ final class AppStore: ObservableObject {
     }
     /// Style snapshots keyed by selectionID, surviving activeBlock/draft
     /// being cleared OR replaced by a new selection before the async commit reads them.
-    private struct BlockStyleSnapshot { let selectionID: Int; let fontSize: Double; let colorHex: String; let bold: Bool; let italic: Bool; let underline: Bool; let alignment: String; let fontFamily: String?; let backgroundHex: String?; let colorRuns: [ColorRun] }
+    private struct BlockStyleSnapshot { let selectionID: Int; let fontSize: Double; let colorHex: String; let bold: Bool; let italic: Bool; let underline: Bool; let alignment: String; let fontFamily: String?; let backgroundHex: String?; let colorRuns: [ColorRun]; let resizedEngineRect: CGRect? }
     private struct DraftStyleSnapshot { let selectionID: Int; let fontName: String; let fontSize: Double; let colorHex: String; let bold: Bool; let italic: Bool; let underline: Bool; let alignment: String }
     private var blockStyleBySelection: [Int: BlockStyleSnapshot] = [:]
     private var draftStyleBySelection: [Int: DraftStyleSnapshot] = [:]
@@ -254,6 +267,11 @@ final class AppStore: ObservableObject {
     /// Other blocks on the active page (engine coords) — alignment guide
     /// candidates while dragging the active block.
     @Published var activeBlockGuides: [CGRect] = []
+    /// Where the user dragged the floating Text style panel, relative to its
+    /// default top-right corner. Lives here (not in the panel's @State) so it
+    /// survives every SwiftUI rebuild and every new block selection: the panel
+    /// stays exactly where it was parked for the rest of the session.
+    @Published var textPanelOffset: CGSize = .zero
     /// The open block editor's current text selection, bridged up from AppKit
     /// (the selection lives in the NSTextView). Offsets index the FULL block
     /// text. nil/empty means nothing is selected. Not @Published: it is read
@@ -1212,6 +1230,9 @@ final class AppStore: ObservableObject {
             block.fontFamily = style.fontFamily
             block.backgroundHex = style.backgroundHex
             block.colorRuns = style.colorRuns
+            // The editor's own payload is the authority on the dragged-out
+            // frame; the snapshot only fills in when it carries nothing.
+            block.resizedEngineRect = block.resizedEngineRect ?? style.resizedEngineRect
         }
         blockStyleBySelection[block.selectionID] = nil
         if activeBlock?.selectionID == block.selectionID {
@@ -1224,7 +1245,13 @@ final class AppStore: ObservableObject {
         }
         editorLog.info("commitBlockEdit MERGED italic=\(block.italic) under=\(block.underline) align=\(block.alignment) changed=\(block.styleChanged) textChanged=\(newText != block.originalText)")
         let textChanged = newText != block.originalText
-        guard textChanged || block.styleChanged else { return }
+        // Guaranteed no-op: clicking away from a block you looked at but did
+        // not change must never touch the document. No engine call, no undo
+        // entry, no re-render (which would otherwise re-flow the paragraph).
+        guard textChanged || block.styleChanged || block.wasResized else {
+            editorLog.info("commitBlockEdit NO-OP sel=\(block.selectionID): text and style unchanged")
+            return
+        }
         // If the user already clicked the NEXT paragraph, the op below will
         // close that editor (document changes). Re-open it for them after.
         let displaced = activeBlock
@@ -1258,14 +1285,35 @@ final class AppStore: ObservableObject {
                 lineHeight: block.lineHeight,
                 trackOriginal: trackOriginal,
                 originalText: block.originalText,
-                colorRunsJSON: colorRunsJSON
+                colorRunsJSON: colorRunsJSON,
+                renderRect: block.resizedEngineRectString
             )
         }
     }
 
     func cancelBlockEdit(block: ActiveTextBlock) {
+        // Drop the pending style edits too: a cancel must leave NOTHING that a
+        // later commit for this selection could still apply.
+        blockStyleBySelection[block.selectionID] = nil
         if activeBlock?.selectionID == block.selectionID {
             activeBlock = nil
+        }
+    }
+
+    /// Escape from the SwiftUI side (the style panel has focus). Routed
+    /// through the AppKit view so the open editor is ABANDONED rather than
+    /// torn down — simply clearing `activeBlock` here would remove the editor
+    /// view, and resigning first responder commits.
+    func cancelActiveEditing() {
+        if let view = pdfViewProxy.pdfView as? PDFPreviewView.EditingPDFView,
+           view.cancelLiveEditors() {
+            return
+        }
+        if let block = activeBlock {
+            cancelBlockEdit(block: block)
+        }
+        if let draft = newTextDraft {
+            cancelNewText(draft: draft)
         }
     }
 

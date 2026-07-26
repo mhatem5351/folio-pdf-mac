@@ -271,6 +271,244 @@ def main() -> int:
             assert red_pixels(span_for("alpha")["bbox"]) == 0, "red bled into alpha"
             assert red_pixels(span_for("gamma")["bbox"]) == 0, "red bled into gamma"
 
+        # ------------------------------------------------------------------
+        # Invoice row: same-baseline COLUMNS must be independent segments.
+        # PyMuPDF hands back one block per row, so a description and the
+        # amount on its right used to be a single editable paragraph: clicking
+        # the amount opened an editor over the description, and committing
+        # re-stacked both columns at the row's left edge.
+        # ------------------------------------------------------------------
+        invoice = tmp_path / "invoice.pdf"
+        idoc = fitz.open()
+        ipage = idoc.new_page(width=612, height=792)
+        helv, hebo = fitz.Font("helv"), fitz.Font("hebo")
+        column_right = 540.0
+        description = "Work on Project - Progress Payment 2 - still in progress, covering"
+        continuation = "+ work through 6/6/2026"
+
+        def right_aligned(text: str, y: float, font, fontname: str, size: float) -> float:
+            x = column_right - font.text_length(text, fontsize=size)
+            ipage.insert_text((x, y), text, fontname=fontname, fontsize=size)
+            return x
+
+        # Header row (letter-spaced, as invoice headers usually are).
+        ipage.insert_text((72, 200), "D E S C R I P T I O N", fontname="hebo", fontsize=9)
+        header_amount_x = right_aligned("A M O U N T", 200, hebo, "hebo", 9)
+        # Body row: wrapped description on the left, amount on the FIRST
+        # baseline. Drawn in this order on purpose — it is what makes PyMuPDF
+        # hand back all three lines as ONE block, the exact shape that used to
+        # break editing (verified: the raw dict block spans x 72 -> 540).
+        ipage.insert_text((72, 230), description, fontname="helv", fontsize=10)
+        right_aligned("$5,000", 230, helv, "helv", 10)
+        ipage.insert_text((72, 244), continuation, fontname="helv", fontsize=10)
+        # A plain left-hand paragraph: must NOT be split up by segmentation.
+        ipage.insert_textbox(
+            fitz.Rect(72, 400, 400, 480),
+            "This is a plain wrapped paragraph of ordinary body copy that runs "
+            "across several lines without any second column at all.",
+            fontname="helv", fontsize=10,
+        )
+        idoc.save(str(invoice))
+        idoc.close()
+
+        blocks = run_engine("page-blocks", "--input", str(invoice), "--page", "1")["blocks"]
+        texts = [b["text"] for b in blocks]
+
+        # (a) the amount is its own narrow segment...
+        amounts = [b for b in blocks if b["text"] == "$5,000"]
+        assert len(amounts) == 1, f"amount is not its own segment: {texts}"
+        amount = amounts[0]
+        amount_width = amount["rect"][2] - amount["rect"][0]
+        assert amount_width < 100, f"amount segment too wide (columns still merged): {amount_width}"
+        # ...and the header row is TWO segments, not one merged block.
+        header_left = [b for b in blocks if b["text"].replace(" ", "") == "DESCRIPTION"]
+        header_right = [b for b in blocks if b["text"].replace(" ", "") == "AMOUNT"]
+        assert len(header_left) == 1 and len(header_right) == 1, \
+            f"header row did not split into two segments: {texts}"
+        assert header_left[0]["rect"][2] < header_right[0]["rect"][0], "header segments overlap"
+        # The description keeps BOTH its wrapped lines in one segment.
+        body = [b for b in blocks if b["text"] == f"{description}\n{continuation}"]
+        assert len(body) == 1, f"wrapped description is not one segment: {texts}"
+        assert body[0]["rect"][2] < amount["rect"][0], "description segment ran into the amount"
+
+        # (e) a plain multi-line left paragraph still edits as ONE segment.
+        plain = [b for b in blocks if b["text"].startswith("This is a plain wrapped")]
+        assert len(plain) == 1, f"plain paragraph over-split into {len(plain)} segments"
+        assert plain[0]["text"].count("\n") >= 1, "plain paragraph lost its line structure"
+
+        # (b) clicking the amount selects the amount, not the whole row.
+        hit = run_engine(
+            "block-at", "--input", str(invoice), "--page", "1",
+            "--x", str((amount["rect"][0] + amount["rect"][2]) / 2),
+            "--y", str((amount["rect"][1] + amount["rect"][3]) / 2),
+        )
+        assert hit.get("found") and hit["text"] == "$5,000", f"block-at hit the wrong segment: {hit}"
+
+        # (c) editing the amount keeps its RIGHT edge and leaves the
+        # description byte-identical (no clipped or duplicated glyphs).
+        before_txt = tmp_path / "invoice-before.txt"
+        assert run_engine("export-text", "--input", str(invoice), "--output", str(before_txt)).get("ok")
+        out = tmp_path / "invoice-amount.pdf"
+        assert run_engine(
+            "replace-block", "--input", str(invoice), "--output", str(out), "--page", "1",
+            "--rect", ",".join(str(v) for v in amount["rect"]),
+            "--text", "$12,345.67", "--original-text", "$5,000",
+        ).get("ok")
+        with fitz.open(str(out)) as d:
+            edited = next(
+                s for b in d[0].get_text("dict")["blocks"]
+                for l in b.get("lines", []) for s in l.get("spans", [])
+                if "12,345" in s["text"]
+            )
+            drift = abs(edited["bbox"][2] - amount["rect"][2])
+            assert drift <= 2.5, f"amount drifted out of its column by {drift}pt"
+        after_txt = tmp_path / "invoice-after.txt"
+        assert run_engine("export-text", "--input", str(out), "--output", str(after_txt)).get("ok")
+        before_lines = before_txt.read_text(encoding="utf-8").splitlines()
+        after_lines = after_txt.read_text(encoding="utf-8").splitlines()
+        for wanted in (description, continuation):
+            assert wanted in before_lines, f"fixture line missing before the edit: {wanted!r}"
+            assert wanted in after_lines, \
+                f"description text damaged by the amount edit: {[l for l in after_lines if 'covering' in l or '6/6/2026' in l]}"
+        assert before_lines.count(description) == after_lines.count(description), \
+            "description line duplicated or lost by the amount edit"
+
+        # (d) editing the left header must not move the right header.
+        out = tmp_path / "invoice-header.pdf"
+        assert run_engine(
+            "replace-block", "--input", str(invoice), "--output", str(out), "--page", "1",
+            "--rect", ",".join(str(v) for v in header_left[0]["rect"]),
+            "--text", "ITEMS", "--original-text", header_left[0]["text"],
+        ).get("ok")
+        after_blocks = run_engine("page-blocks", "--input", str(out), "--page", "1")["blocks"]
+        moved = [b for b in after_blocks if b["text"].replace(" ", "") == "AMOUNT"]
+        assert len(moved) == 1, f"AMOUNT header lost by the DESCRIPTION edit: {[b['text'] for b in after_blocks]}"
+        shift = abs(moved[0]["rect"][0] - header_amount_x)
+        assert shift <= 2, f"AMOUNT header moved {shift}pt when DESCRIPTION was edited"
+        assert any(b["text"] == "ITEMS" for b in after_blocks), "replacement header text missing"
+
+        # ------------------------------------------------------------------
+        # Resize the editor frame: --render-rect reflows the replacement into
+        # the NEW box (erasing still follows --rect). A narrower box wraps to
+        # more lines and stays inside itself; a wider box wraps to fewer.
+        # ------------------------------------------------------------------
+        reflow = tmp_path / "reflow.pdf"
+        fdoc = fitz.open()
+        fpage = fdoc.new_page(width=612, height=792)
+        paragraph = (
+            "This paragraph is long enough to demonstrate that narrowing the "
+            "editor box forces the replacement text to wrap onto more lines."
+        )
+        # Left column paragraph...
+        fpage.insert_textbox(fitz.Rect(72, 300, 400, 360), paragraph, fontname="helv", fontsize=10)
+        # ...and an untouched right column sharing the first baseline.
+        fpage.insert_text((470, 308), "KEEP ME", fontname="helv", fontsize=10)
+        fdoc.save(str(reflow))
+        fdoc.close()
+
+        para_block = next(
+            b for b in run_engine("page-blocks", "--input", str(reflow), "--page", "1")["blocks"]
+            if b["text"].startswith("This paragraph is long")
+        )
+        px0, py0, px1, py1 = para_block["rect"]
+        base_rect = f"{px0},{py0},{px1},{py1}"
+
+        def reflow_run(name: str, render_rect: str | None) -> tuple[int, tuple[float, float, float, float]]:
+            """Replace the paragraph (optionally into `render_rect`) and report
+            (line count, bbox of the replacement text)."""
+            out_path = tmp_path / name
+            call = [
+                "replace-block", "--input", str(reflow), "--output", str(out_path),
+                "--page", "1", "--rect", base_rect, "--text", paragraph,
+                "--original-text", para_block["text"],
+            ]
+            if render_rect:
+                call += ["--render-rect", render_rect]
+            assert run_engine(*call).get("ok"), f"{name}: replace-block failed"
+            with fitz.open(str(out_path)) as d:
+                p = d[0]
+                assert "KEEP ME" in p.get_text(), f"{name}: right column destroyed"
+                spans = [
+                    s for b in p.get_text("dict")["blocks"]
+                    for l in b.get("lines", []) for s in l.get("spans", [])
+                    if "KEEP ME" not in s["text"] and s["text"].strip()
+                ]
+                assert spans, f"{name}: replacement text missing"
+                lines = {round(s["origin"][1], 1) for s in spans}
+                box = (
+                    min(s["bbox"][0] for s in spans), min(s["bbox"][1] for s in spans),
+                    max(s["bbox"][2] for s in spans), max(s["bbox"][3] for s in spans),
+                )
+                return len(lines), box
+
+        baseline_lines, _ = reflow_run("reflow-same.pdf", None)
+
+        # HALF the original width: strictly more lines, all inside the box.
+        half_x1 = px0 + (px1 - px0) / 2
+        narrow = f"{px0},{py0},{half_x1},{py1}"
+        narrow_lines, narrow_box = reflow_run("reflow-narrow.pdf", narrow)
+        assert narrow_lines > baseline_lines, \
+            f"half-width render-rect did not wrap to more lines: {narrow_lines} vs {baseline_lines}"
+        assert narrow_box[0] >= px0 - 2 and narrow_box[2] <= half_x1 + 2, \
+            f"reflowed text escaped the render-rect: {narrow_box} vs x {px0}-{half_x1}"
+        assert narrow_box[1] >= py0 - 4, f"reflowed text started above the render-rect: {narrow_box[1]} vs {py0}"
+
+        # A WIDER box wraps to fewer lines than the narrow one (and than the
+        # unresized default, whose width is the original block's).
+        wide = f"{px0},{py0},{px0 + 480},{py1}"
+        wide_lines, wide_box = reflow_run("reflow-wide.pdf", wide)
+        assert wide_lines < narrow_lines, \
+            f"wider render-rect did not reduce wrapping: {wide_lines} vs {narrow_lines}"
+        assert wide_lines <= baseline_lines, \
+            f"wider render-rect wrapped more than the original width: {wide_lines} vs {baseline_lines}"
+        assert wide_box[2] <= px0 + 480 + 2, f"wide reflow escaped its render-rect: {wide_box}"
+
+        # No --render-rect => byte-identical to the pre-existing behavior.
+        plain_a = tmp_path / "reflow-plain-a.pdf"
+        assert run_engine(
+            "replace-block", "--input", str(reflow), "--output", str(plain_a), "--page", "1",
+            "--rect", base_rect, "--text", paragraph, "--original-text", para_block["text"],
+        ).get("ok")
+        # ...and passing the SAME rect as --render-rect is treated as no resize.
+        plain_b = tmp_path / "reflow-plain-b.pdf"
+        assert run_engine(
+            "replace-block", "--input", str(reflow), "--output", str(plain_b), "--page", "1",
+            "--rect", base_rect, "--text", paragraph, "--original-text", para_block["text"],
+            "--render-rect", base_rect,
+        ).get("ok")
+        with fitz.open(str(plain_a)) as da, fitz.open(str(plain_b)) as db:
+            assert da[0].get_text() == db[0].get_text(), "identical render-rect changed the result"
+
+        # Right-anchoring is skipped when an explicit resize is given: the
+        # amount follows the render-rect instead of pinning its old right edge.
+        anchor_src = tmp_path / "anchor.pdf"
+        adoc = fitz.open()
+        apage = adoc.new_page(width=612, height=792)
+        afont = fitz.Font("helv")
+        apage.insert_text((540 - afont.text_length("$5,000", fontsize=10), 400), "$5,000", fontname="helv", fontsize=10)
+        adoc.save(str(anchor_src))
+        adoc.close()
+        amount_block = next(
+            b for b in run_engine("page-blocks", "--input", str(anchor_src), "--page", "1")["blocks"]
+            if "$5,000" in b["text"]
+        )
+        ax0, ay0, ax1, ay1 = amount_block["rect"]
+        out = tmp_path / "anchor-resized.pdf"
+        assert run_engine(
+            "replace-block", "--input", str(anchor_src), "--output", str(out), "--page", "1",
+            "--rect", f"{ax0},{ay0},{ax1},{ay1}", "--text", "$12,345.67",
+            "--original-text", "$5,000",
+            "--render-rect", f"{ax0 - 120},{ay0},{ax1},{ay1}",
+        ).get("ok")
+        with fitz.open(str(out)) as d:
+            moved = next(
+                s for b in d[0].get_text("dict")["blocks"]
+                for l in b.get("lines", []) for s in l.get("spans", [])
+                if "12,345" in s["text"]
+            )
+            assert abs(moved["bbox"][0] - (ax0 - 120)) <= 2.5, \
+                f"resize did not override right-anchoring: left edge {moved['bbox'][0]} vs {ax0 - 120}"
+
         # Password protection
         out = tmp_path / "locked.pdf"
         assert run_engine("set-password", "--input", str(src), "--output", str(out), "--password", "hunter2").get("ok")

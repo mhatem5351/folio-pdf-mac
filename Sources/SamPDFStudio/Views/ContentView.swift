@@ -29,10 +29,15 @@ struct ContentView: View {
         }
         .overlay(alignment: .topTrailing) {
             if store.activeBlock != nil || store.newTextDraft != nil {
-                TextStylePanel()
-                    .padding(.top, 96)
-                    .padding(.trailing, 16)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                // GeometryReader gives the panel the window area it must stay
+                // inside once the user drags it off its default corner.
+                GeometryReader { proxy in
+                    TextStylePanel(bounds: proxy.size)
+                        .padding(.top, 96)
+                        .padding(.trailing, 16)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
         .overlay(alignment: .bottom) {
@@ -786,6 +791,12 @@ private struct EnhanceScanMenuView: View {
 
 private struct TextStylePanel: View {
     @EnvironmentObject private var store: AppStore
+    /// The area the panel floats in, so a drag can't push it off-window.
+    var bounds: CGSize = .zero
+    /// Offset the drag started from (nil while not dragging).
+    @State private var dragOrigin: CGSize?
+    /// Measured so the clamp knows how much panel has to stay on screen.
+    @State private var panelSize: CGSize = CGSize(width: 210, height: 320)
 
     private static let swatches: [(name: String, hex: String)] = [
         ("Black", "#111111"), ("Dark Gray", "#555555"), ("Gray", "#888888"),
@@ -797,21 +808,76 @@ private struct TextStylePanel: View {
         ("Pink", "#fbdde9"), ("Gray", "#ececec"), ("White", "#ffffff"),
     ]
 
-    @ViewBuilder
     var body: some View {
-        if store.activeBlock != nil {
-            blockPanel
-        } else if store.newTextDraft != nil {
-            newTextPanel
+        Group {
+            if store.activeBlock != nil {
+                blockPanel
+            } else if store.newTextDraft != nil {
+                newTextPanel
+            }
         }
+        .background(
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear { panelSize = proxy.size }
+                    .onChange(of: proxy.size) { _, size in panelSize = size }
+            }
+        )
+        // Parked wherever the user last dragged it — the panel used to sit
+        // fixed over the top-right of the page, covering the very text being
+        // edited and swallowing clicks meant for it.
+        .offset(x: store.textPanelOffset.width, y: store.textPanelOffset.height)
+        // Escape from the panel (a swatch or the font menu just took focus)
+        // must cancel the edit, exactly like Escape in the editor itself.
+        .onExitCommand { store.cancelActiveEditing() }
+    }
+
+    /// Draggable title bar: the whole row moves the panel, with a subtle grip
+    /// affordance on the right.
+    private func dragHeader(_ title: String) -> some View {
+        HStack(spacing: 6) {
+            Text(title)
+                .font(.headline)
+            Spacer(minLength: 8)
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.tertiary)
+        }
+        .contentShape(Rectangle())
+        .help("Drag to move this panel")
+        .gesture(
+            DragGesture(minimumDistance: 1)
+                .onChanged { value in
+                    let origin = dragOrigin ?? store.textPanelOffset
+                    if dragOrigin == nil { dragOrigin = origin }
+                    store.textPanelOffset = clampedOffset(CGSize(
+                        width: origin.width + value.translation.width,
+                        height: origin.height + value.translation.height
+                    ))
+                }
+                .onEnded { _ in dragOrigin = nil }
+        )
+    }
+
+    /// Keep at least the whole panel inside the workspace. The panel's resting
+    /// place is the top-right corner, inset by 96pt (top) and 16pt (trailing),
+    /// so offsets run negative to the left and down from there.
+    private func clampedOffset(_ offset: CGSize) -> CGSize {
+        guard bounds.width > 1, bounds.height > 1 else { return offset }
+        let minX = -max(0, bounds.width - panelSize.width - 24)
+        let minY = -88.0
+        let maxY = max(0, bounds.height - panelSize.height - 104)
+        return CGSize(
+            width: min(max(offset.width, minX), 8),
+            height: min(max(offset.height, minY), maxY)
+        )
     }
 
     @ViewBuilder
     private var blockPanel: some View {
         if let block = store.activeBlock {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Text")
-                    .font(.headline)
+                dragHeader("Text")
 
                 Picker("Font", selection: Binding<String?>(
                     get: { store.activeBlock?.fontFamily },
@@ -952,9 +1018,18 @@ private struct TextStylePanel: View {
                     }
                 }
 
-                Text("Click away to apply · Esc cancels")
+                HStack(spacing: 6) {
+                    Text("Click away to apply")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Button("Cancel (esc)") {
+                        store.cancelActiveEditing()
+                    }
+                    .buttonStyle(.plain)
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
+                    .help("Close without applying (Esc)")
+                }
             }
             .padding(14)
             .frame(width: 210)
@@ -968,8 +1043,7 @@ private struct TextStylePanel: View {
     private var newTextPanel: some View {
         if let draft = store.newTextDraft {
             VStack(alignment: .leading, spacing: 12) {
-                Text("New Text")
-                    .font(.headline)
+                dragHeader("New Text")
 
                 Picker("Font", selection: Binding(
                     get: { store.newTextDraft?.fontName ?? "Helvetica" },
@@ -1065,9 +1139,18 @@ private struct TextStylePanel: View {
                     }
                 }
 
-                Text("Click away to apply · Esc cancels")
+                HStack(spacing: 6) {
+                    Text("Click away to apply")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Button("Cancel (esc)") {
+                        store.cancelActiveEditing()
+                    }
+                    .buttonStyle(.plain)
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
+                    .help("Close without applying (Esc)")
+                }
             }
             .padding(14)
             .frame(width: 210)

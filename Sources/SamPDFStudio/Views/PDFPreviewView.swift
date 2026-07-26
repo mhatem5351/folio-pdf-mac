@@ -138,6 +138,14 @@ struct PDFPreviewView: NSViewRepresentable {
             }
         }
 
+        /// AppKit's own "cancel" action: Escape reaches a text view this way
+        /// whenever anything upstream turns the key press into a command
+        /// (interpretKeyEvents, a Cancel key equivalent, the menu). Without
+        /// this, Escape could be swallowed before `keyDown` ever ran.
+        override func cancelOperation(_ sender: Any?) {
+            finish(commit: false)
+        }
+
         override func resignFirstResponder() -> Bool {
             let result = super.resignFirstResponder()
             if result {
@@ -206,6 +214,14 @@ struct PDFPreviewView: NSViewRepresentable {
             super.keyDown(with: event)
         }
 
+        /// Escape delivered as AppKit's cancel ACTION rather than a raw key
+        /// press (the route taken whenever something upstream — a Cancel key
+        /// equivalent, `interpretKeyEvents`, the responder chain — converts it
+        /// before `keyDown` runs). Cancels, never commits.
+        override func cancelOperation(_ sender: Any?) {
+            finish(commit: false)
+        }
+
         override func didChangeText() {
             super.didChangeText()
             onGrew?()
@@ -247,11 +263,46 @@ struct PDFPreviewView: NSViewRepresentable {
             case editing
         }
 
+        /// Which edge/corner a resize handle drives. `.left`/`.right` change
+        /// width (a left drag moves the origin too), `.top`/`.bottom` change
+        /// height, corners do both.
+        enum ResizeHandle: CaseIterable {
+            case left, right, top, bottom
+            case topLeft, topRight, bottomLeft, bottomRight
+
+            var changesLeft: Bool { self == .left || self == .topLeft || self == .bottomLeft }
+            var changesRight: Bool { self == .right || self == .topRight || self == .bottomRight }
+            var changesTop: Bool { self == .top || self == .topLeft || self == .topRight }
+            var changesBottom: Bool { self == .bottom || self == .bottomLeft || self == .bottomRight }
+            var isCorner: Bool { (changesLeft || changesRight) && (changesTop || changesBottom) }
+
+            var cursor: NSCursor {
+                if isCorner { return .crosshair }
+                return (changesLeft || changesRight) ? .resizeLeftRight : .resizeUpDown
+            }
+        }
+
         // Generous border band so the frame is easy to grab while editing.
         static let inset: CGFloat = 11
+        /// Handle hit target (≥ 12pt as specced), centered on the drawn dot.
+        static let handleHitSize: CGFloat = 14
+        /// Smallest text width the user can drag down to, in view points.
+        static let minContentWidth: CGFloat = 40
         let textView: BlockTextView
         var representedRect: CGRect = .zero
         var onMoved: ((NSPoint) -> Void)?
+        /// Handles drag the frame's geometry (block editor). Off for the
+        /// blank new-text box, whose commit has no rect to resize.
+        var resizable: Bool = true
+        /// True once a handle drag actually changed the frame — the commit
+        /// then renders into the new box instead of the block's original one.
+        private(set) var didResize = false
+        /// Fires when a handle drag finishes, so the owner can remember the new
+        /// geometry (scroll/zoom repositioning must not undo the resize).
+        var onResized: (() -> Void)?
+        private var activeHandle: ResizeHandle?
+        private var resizeStartFrame: NSRect = .zero
+        var isResizing: Bool { activeHandle != nil }
         /// Given a proposed frame, returns a (possibly snapped) origin.
         var snapProvider: ((NSRect) -> NSPoint)?
         var onDragEnded: (() -> Void)?
@@ -318,7 +369,9 @@ struct PDFPreviewView: NSViewRepresentable {
 
         override func cursorUpdate(with event: NSEvent) {
             let point = convert(event.locationInWindow, from: nil)
-            if phase == .editing && textView.frame.contains(point) {
+            if let handle = activeHandle ?? handle(at: point) {
+                handle.cursor.set()
+            } else if phase == .editing && textView.frame.contains(point) {
                 NSCursor.iBeam.set()
             } else if movable {
                 NSCursor.openHand.set()
@@ -353,17 +406,22 @@ struct PDFPreviewView: NSViewRepresentable {
         }
 
         override func keyDown(with event: NSEvent) {
-            if phase == .selected {
-                if event.keyCode == 53 { // Escape — deselect without changes
-                    textView.finish(commit: false)
-                    return
-                }
-                if event.keyCode == 36 || event.keyCode == 76 { // Return — edit
-                    enterEditing(at: nil)
-                    return
-                }
+            // Escape abandons the edit in BOTH phases — the frame may hold
+            // focus while the caret sits in the text view, or the other way
+            // round, and Escape must never depend on which.
+            if event.keyCode == 53 {
+                textView.finish(commit: false)
+                return
+            }
+            if phase == .selected, event.keyCode == 36 || event.keyCode == 76 { // Return — edit
+                enterEditing(at: nil)
+                return
             }
             super.keyDown(with: event)
+        }
+
+        override func cancelOperation(_ sender: Any?) {
+            textView.finish(commit: false)
         }
 
         override func resignFirstResponder() -> Bool {
@@ -389,17 +447,9 @@ struct PDFPreviewView: NSViewRepresentable {
             accent.setStroke()
             border.stroke()
 
-            // Circular handles on the block box.
+            // Circular handles on the block box — every one is draggable.
             let radius: CGFloat = 3.5
-            let points = [
-                NSPoint(x: bounds.minX + 1.5, y: bounds.midY),
-                NSPoint(x: bounds.maxX - 1.5, y: bounds.midY),
-                NSPoint(x: bounds.minX + 1.5, y: bounds.maxY - 1.5),
-                NSPoint(x: bounds.maxX - 1.5, y: bounds.maxY - 1.5),
-                NSPoint(x: bounds.minX + 1.5, y: bounds.minY + 1.5),
-                NSPoint(x: bounds.maxX - 1.5, y: bounds.minY + 1.5),
-            ]
-            for point in points {
+            for (_, point) in handlePoints() {
                 let dot = NSBezierPath(ovalIn: NSRect(
                     x: point.x - radius, y: point.y - radius,
                     width: radius * 2, height: radius * 2
@@ -412,6 +462,122 @@ struct PDFPreviewView: NSViewRepresentable {
             }
         }
 
+        // MARK: Resize handles
+
+        /// The eight handle centers, in this view's own coordinates. `maxY` is
+        /// this view's own top edge; whether that reads as visually top depends
+        /// on the superview, but the drag math below works in frame space, so
+        /// the mapping stays consistent either way.
+        private func handlePoints() -> [(ResizeHandle, NSPoint)] {
+            let left = bounds.minX + 1.5
+            let right = bounds.maxX - 1.5
+            let top = bounds.maxY - 1.5
+            let bottom = bounds.minY + 1.5
+            return [
+                (.left, NSPoint(x: left, y: bounds.midY)),
+                (.right, NSPoint(x: right, y: bounds.midY)),
+                (.top, NSPoint(x: bounds.midX, y: top)),
+                (.bottom, NSPoint(x: bounds.midX, y: bottom)),
+                (.topLeft, NSPoint(x: left, y: top)),
+                (.topRight, NSPoint(x: right, y: top)),
+                (.bottomLeft, NSPoint(x: left, y: bottom)),
+                (.bottomRight, NSPoint(x: right, y: bottom)),
+            ]
+        }
+
+        /// Handle under `point` (this view's coordinates), corners first so a
+        /// corner always wins where its target overlaps an edge midpoint's.
+        func handle(at point: NSPoint) -> ResizeHandle? {
+            guard resizable else { return nil }
+            let size = Self.handleHitSize
+            let targets = handlePoints().map { pair -> (ResizeHandle, NSRect) in
+                (pair.0, NSRect(
+                    x: pair.1.x - size / 2, y: pair.1.y - size / 2,
+                    width: size, height: size
+                ))
+            }
+            if let corner = targets.first(where: { $0.0.isCorner && $0.1.contains(point) }) {
+                return corner.0
+            }
+            return targets.first(where: { $0.1.contains(point) })?.0
+        }
+
+        /// Smallest height that still shows all the laid-out text, so dragging
+        /// the top/bottom handle can never clip the paragraph.
+        private func fittedHeight() -> CGFloat {
+            guard let layoutManager = textView.layoutManager,
+                  let container = textView.textContainer else { return Self.inset * 2 + 16 }
+            layoutManager.ensureLayout(for: container)
+            return layoutManager.usedRect(for: container).height + Self.inset * 2 + 4
+        }
+
+        /// Apply a handle drag: `delta` is the mouse movement since the drag
+        /// began, in the superview's coordinates.
+        private func applyResize(_ handle: ResizeHandle, delta: NSPoint) {
+            let start = resizeStartFrame
+            let minWidth = Self.minContentWidth + (Self.inset + 5) * 2
+            let minHeight = max(Self.inset * 2 + 12, fittedHeight())
+            var new = start
+
+            if handle.changesLeft {
+                let x = min(start.minX + delta.x, start.maxX - minWidth)
+                new.origin.x = x
+                new.size.width = start.maxX - x
+            } else if handle.changesRight {
+                new.size.width = max(minWidth, start.width + delta.x)
+            }
+            if handle.changesTop {
+                new.size.height = max(minHeight, start.height + delta.y)
+            } else if handle.changesBottom {
+                let y = min(start.minY + delta.y, start.maxY - minHeight)
+                new.origin.y = y
+                new.size.height = start.maxY - y
+            }
+            // Keep the frame on the page (the superview is the page canvas).
+            if let bounds = superview?.bounds {
+                if new.minX < bounds.minX {
+                    new.size.width = max(minWidth, new.maxX - bounds.minX)
+                    new.origin.x = new.maxX - new.size.width
+                }
+                if new.maxX > bounds.maxX {
+                    new.size.width = max(minWidth, bounds.maxX - new.minX)
+                }
+                if new.minY < bounds.minY {
+                    new.size.height = max(minHeight, new.maxY - bounds.minY)
+                    new.origin.y = new.maxY - new.size.height
+                }
+                if new.maxY > bounds.maxY {
+                    new.size.height = max(minHeight, bounds.maxY - new.minY)
+                }
+            }
+            guard new != frame else { return }
+            frame = new
+            layoutTextView()
+            didResize = true
+            // A narrower box needs more lines: let the frame follow the text
+            // down, exactly as it does while typing.
+            growToFitText()
+            needsDisplay = true
+        }
+
+        /// Text view fills the frame inside the border band. Changing its width
+        /// re-wraps live (the container tracks the view's width).
+        private func layoutTextView() {
+            textView.frame = NSRect(
+                x: Self.inset, y: Self.inset,
+                width: max(20, frame.width - Self.inset * 2),
+                height: max(16, frame.height - Self.inset * 2)
+            )
+        }
+
+        /// The frame the commit must render into, or nil when never resized.
+        /// Strips the border band so the caller gets the text box itself —
+        /// the exact inverse of the inset applied when the editor opened.
+        func resizedContentFrame() -> NSRect? {
+            guard didResize else { return nil }
+            return frame.insetBy(dx: Self.inset + 5, dy: Self.inset)
+        }
+
         private func growToFitText() {
             guard let layoutManager = textView.layoutManager,
                   let container = textView.textContainer else { return }
@@ -422,11 +588,7 @@ struct PDFPreviewView: NSViewRepresentable {
                 var newFrame = frame
                 newFrame.size.height = needed
                 frame = newFrame
-                textView.frame = NSRect(
-                    x: Self.inset, y: Self.inset,
-                    width: frame.width - Self.inset * 2,
-                    height: frame.height - Self.inset * 2
-                )
+                layoutTextView()
                 needsDisplay = true
             }
         }
@@ -434,6 +596,18 @@ struct PDFPreviewView: NSViewRepresentable {
         // Selected phase: drag from ANYWHERE moves the block; a plain click
         // enters text editing. Editing phase: only the border band drags.
         override func mouseDown(with event: NSEvent) {
+            // A handle grab resizes instead of moving/typing — in BOTH modes,
+            // and in both phases, whenever the dashed frame is on screen.
+            if let handle = handle(at: convert(event.locationInWindow, from: nil)) {
+                // Deliberately does NOT take first responder: pulling focus off
+                // the text view resigns it, which commits and tears the editor
+                // down — mid-drag. Mouse tracking stays with this view anyway.
+                activeHandle = handle
+                resizeStartFrame = frame
+                dragStartMouse = superview?.convert(event.locationInWindow, from: nil)
+                handle.cursor.set()
+                return
+            }
             window?.makeFirstResponder(self)
             dragStartMouse = superview?.convert(event.locationInWindow, from: nil)
             dragStartOrigin = frame.origin
@@ -447,6 +621,13 @@ struct PDFPreviewView: NSViewRepresentable {
         }
 
         override func mouseDragged(with event: NSEvent) {
+            if let handle = activeHandle {
+                guard let start = dragStartMouse,
+                      let current = superview?.convert(event.locationInWindow, from: nil) else { return }
+                applyResize(handle, delta: NSPoint(x: current.x - start.x, y: current.y - start.y))
+                handle.cursor.set()
+                return
+            }
             guard movable else { return }
             guard let start = dragStartMouse,
                   let origin = dragStartOrigin,
@@ -465,6 +646,17 @@ struct PDFPreviewView: NSViewRepresentable {
         }
 
         override func mouseUp(with event: NSEvent) {
+            // Finishing a handle drag only reshapes the editor: the reflowed
+            // text is written when the edit itself is committed, so this must
+            // not move the block or drop into typing.
+            if activeHandle != nil {
+                activeHandle = nil
+                dragStartMouse = nil
+                editorLog.info("editor resize ended frame=(\(self.frame.width) x \(self.frame.height))")
+                if didResize { onResized?() }
+                window?.invalidateCursorRects(for: self)
+                return
+            }
             defer {
                 dragStartMouse = nil
                 dragStartOrigin = nil
@@ -487,6 +679,17 @@ struct PDFPreviewView: NSViewRepresentable {
             addCursorRect(bounds, cursor: .openHand)
             if phase == .editing {
                 addCursorRect(textView.frame, cursor: .iBeam)
+            }
+            // Added last so the handle targets win wherever they overlap the
+            // frame band or the text area.
+            if resizable {
+                let size = Self.handleHitSize
+                for (handle, point) in handlePoints() {
+                    addCursorRect(
+                        NSRect(x: point.x - size / 2, y: point.y - size / 2, width: size, height: size),
+                        cursor: handle.cursor
+                    )
+                }
             }
         }
     }
@@ -643,13 +846,21 @@ struct PDFPreviewView: NSViewRepresentable {
         private var guideEngineRects: [CGRect] = []
         private var activeBlockPageIndex: Int = 0
         private var activeBlockEngineRect: CGRect = .zero
+        /// Box the open editor was resized to (engine coords), or nil while it
+        /// still matches the block's own rect.
+        private var resizedEditorEngineRect: CGRect?
         private var scrollObservers: [NSObjectProtocol] = []
         /// Guards against SwiftUI resurrecting a locally-closed editor.
         private var lastSyncedBlockKey: String?
+        /// Live only while a text editor is open (see startEscapeMonitor).
+        private var escapeMonitor: Any?
 
         deinit {
             for observer in scrollObservers {
                 NotificationCenter.default.removeObserver(observer)
+            }
+            if let escapeMonitor {
+                NSEvent.removeMonitor(escapeMonitor)
             }
         }
 
@@ -691,11 +902,15 @@ struct PDFPreviewView: NSViewRepresentable {
         }
 
         private func repositionBlockEditor() {
-            guard let editor = blockEditor, !editor.isDragging else { return }
+            guard let editor = blockEditor, !editor.isDragging, !editor.isResizing else { return }
             guard let page = document?.page(at: activeBlockPageIndex) else { return }
+            // A resized frame is re-anchored from the box the user dragged out,
+            // never from the paragraph's original rect — scrolling or zooming
+            // must not silently undo the resize.
+            let source = resizedEditorEngineRect ?? activeBlockEngineRect
             let engineRect = NSRect(
-                x: activeBlockEngineRect.minX, y: activeBlockEngineRect.minY,
-                width: activeBlockEngineRect.width, height: activeBlockEngineRect.height
+                x: source.minX, y: source.minY,
+                width: source.width, height: source.height
             )
             guard let pdfKit = pdfKitRect(fromEngineRect: engineRect, page: page) else { return }
             var viewRect = convert(pdfKit, from: page)
@@ -978,6 +1193,12 @@ struct PDFPreviewView: NSViewRepresentable {
         }
 
         override func keyDown(with event: NSEvent) {
+            // Escape ALWAYS abandons a live text edit, whatever holds focus.
+            // The PDFView reclaims first responder on every page click, so the
+            // editor's own key handler cannot be the only route.
+            if event.keyCode == 53, cancelLiveEditors() {
+                return
+            }
             // Delete / Forward-delete removes an annotation selected in Edit
             // mode (Delete=51, Fn+Delete=117).
             if isEditingEnabled, blockEditor == nil,
@@ -1082,6 +1303,71 @@ struct PDFPreviewView: NSViewRepresentable {
             if editTool != .grab {
                 clearRegionOverlay()
             }
+        }
+
+        // MARK: Escape
+
+        /// Abandon any live block edit or new-text draft WITHOUT committing.
+        /// The single place Escape lands, whatever route it arrives by (the
+        /// editor's keyDown/cancelOperation, this view's keyDown, the SwiftUI
+        /// style panel, or the key monitor). Returns true when there was
+        /// something to cancel, so callers know whether they consumed the key.
+        @discardableResult
+        func cancelLiveEditors() -> Bool {
+            let block = liveActiveBlock?()
+            let draft = liveNewTextDraft?()
+            guard blockEditor != nil || newTextEditor != nil || block != nil || draft != nil else {
+                return false
+            }
+            editorLog.info("cancelLiveEditors")
+            // Close the AppKit editors SILENTLY first: tearing them down
+            // resigns first responder, and that path commits.
+            blockEditor?.textView.abandon()
+            newTextEditor?.textView.abandon()
+            removeBlockEditorView()
+            removeNewTextEditorView()
+            // A cancelled draft must not be restored from the typing backup.
+            draftTextBackup = nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if let block {
+                    self.onCancelBlock?(block)
+                }
+                if let draft {
+                    self.onCancelNewText?(draft)
+                }
+            }
+            return true
+        }
+
+        override func cancelOperation(_ sender: Any?) {
+            if cancelLiveEditors() {
+                return
+            }
+            super.cancelOperation(sender)
+        }
+
+        /// Escape is dispatched as a key EQUIVALENT before it ever reaches the
+        /// first responder's `keyDown`, so a Cancel-shortcut button or hosting
+        /// view elsewhere in the window can swallow it. A local monitor sees
+        /// the event before the window does, which makes Escape's cancel
+        /// unconditional for as long as an editor is open.
+        func startEscapeMonitor() {
+            guard escapeMonitor == nil else { return }
+            editorLog.info("escapeMonitor installed")
+            escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, event.keyCode == 53 else { return event }
+                editorLog.info("escapeMonitor keyDown 53 windowMatch=\(event.window === self.window) editors=\(self.blockEditor != nil || self.newTextEditor != nil)")
+                guard self.blockEditor != nil || self.newTextEditor != nil else { return event }
+                self.cancelLiveEditors()
+                return nil
+            }
+        }
+
+        func stopEscapeMonitorIfIdle() {
+            guard blockEditor == nil, newTextEditor == nil, let monitor = escapeMonitor else { return }
+            NSEvent.removeMonitor(monitor)
+            escapeMonitor = nil
         }
 
         // MARK: Placement helpers
@@ -1205,10 +1491,19 @@ struct PDFPreviewView: NSViewRepresentable {
             // Every callback carries `block` (captured at open): by the time
             // the async hop runs, the user may have selected a different
             // paragraph, and the store must act on THIS one, not that one.
-            editor.textView.onCommit = { [weak self] text in
-                self?.removeBlockEditorView()
-                DispatchQueue.main.async {
-                    self?.onCommitBlock?(block, text)
+            editor.textView.onCommit = { [weak self, weak editor] text in
+                guard let self else { return }
+                // Read the frame BEFORE the editor is torn down: a dragged
+                // handle means the replacement reflows into that box, not the
+                // paragraph's original rect.
+                var payload = block
+                if let editor, let resized = self.resizedEngineRect(for: editor, page: page) {
+                    payload.resizedEngineRect = resized
+                    editorLog.info("commit with resized rect \(resized.debugDescription)")
+                }
+                self.removeBlockEditorView()
+                DispatchQueue.main.async { [weak self] in
+                    self?.onCommitBlock?(payload, text)
                 }
             }
             editor.textView.onCancel = { [weak self] in
@@ -1235,10 +1530,22 @@ struct PDFPreviewView: NSViewRepresentable {
                 // silently FIRST so resigning focus can't fire a commit or
                 // cancel that clears the active block before the move runs.
                 let currentText = editor.textView.string
+                // Moved AND resized: the dropped frame already carries both the
+                // new origin and the new width, so one replace-block with a
+                // render-rect does the whole thing — erase the original lines,
+                // reflow into the box where it landed.
+                let movedAndResized = self.resizedEngineRect(for: editor, page: page)
                 editor.textView.abandon()
                 self.removeBlockEditorView()
                 DispatchQueue.main.async { [weak self] in
-                    self?.onMoveBlock?(block, currentText, origin.x, origin.y)
+                    guard let self else { return }
+                    if let movedAndResized {
+                        var payload = block
+                        payload.resizedEngineRect = movedAndResized
+                        self.onCommitBlock?(payload, currentText)
+                    } else {
+                        self.onMoveBlock?(block, currentText, origin.x, origin.y)
+                    }
                 }
             }
             // Guide sources stay in engine space; view-space candidates are
@@ -1246,6 +1553,7 @@ struct PDFPreviewView: NSViewRepresentable {
             guideEngineRects = guides
             activeBlockPageIndex = block.page - 1
             activeBlockEngineRect = block.engineRect
+            resizedEditorEngineRect = nil
             rebuildGuides()
             startTrackingScroll()
             editor.snapProvider = { [weak self] proposed in
@@ -1257,15 +1565,23 @@ struct PDFPreviewView: NSViewRepresentable {
             editor.onDragEnded = { [weak self] in
                 self?.clearGuideOverlay()
             }
+            editor.onResized = { [weak self, weak editor] in
+                guard let self, let editor else { return }
+                self.resizedEditorEngineRect = self.resizedEngineRect(for: editor, page: page)
+            }
 
             // Cursor mode: click goes straight into typing; the frame is not
             // draggable. Hand mode: click selects, drag anywhere moves.
             editor.movable = blockMoveMode
             editor.editOnClick = false
+            // Handles resize the box in BOTH modes — the text reflows live and
+            // the commit renders into the box the user dragged out.
+            editor.resizable = true
 
             removeNewTextEditorView()
             addSubview(editor)
             blockEditor = editor
+            startEscapeMonitor()
             lastSyncedBlockKey = blockKey
             window?.makeFirstResponder(editor)
             if !blockMoveMode {
@@ -1282,7 +1598,9 @@ struct PDFPreviewView: NSViewRepresentable {
             }
             blockEditor?.removeFromSuperview()
             blockEditor = nil
+            resizedEditorEngineRect = nil
             clearGuideOverlay()
+            stopEscapeMonitorIfIdle()
         }
 
         // MARK: New-text editor lifecycle
@@ -1348,9 +1666,13 @@ struct PDFPreviewView: NSViewRepresentable {
             }
             editor.movable = false
             editor.editOnClick = true
+            // A blank text box commits through add-text, which has no rect to
+            // reflow into — its frame just grows with what is typed.
+            editor.resizable = false
             Self.applyUnderline(editor.textView, draft.underline)
             addSubview(editor)
             newTextEditor = editor
+            startEscapeMonitor()
             newTextEditorSelectionID = draft.selectionID
             lastSyncedBlockKey = key
             window?.makeFirstResponder(editor)
@@ -1375,6 +1697,7 @@ struct PDFPreviewView: NSViewRepresentable {
             }
             newTextEditor?.removeFromSuperview()
             newTextEditor = nil
+            stopEscapeMonitorIfIdle()
         }
 
         static func newTextFont(for draft: NewTextDraft, scale: CGFloat) -> NSFont {
@@ -1727,6 +2050,29 @@ struct PDFPreviewView: NSViewRepresentable {
             let y0 = bounds.maxY - rect.maxY
             let y1 = bounds.maxY - rect.minY
             return "\(x0),\(y0),\(x1),\(y1)"
+        }
+
+        /// Engine-space (top-origin) rect for a PDFKit page rect — the inverse
+        /// of `pdfKitRect(fromEngineRect:page:)`.
+        private func engineRect(fromPDFKitRect rect: NSRect, page: PDFPage) -> CGRect {
+            let bounds = page.bounds(for: .cropBox)
+            return CGRect(
+                x: rect.minX - bounds.minX,
+                y: bounds.maxY - rect.maxY,
+                width: rect.width,
+                height: rect.height
+            )
+        }
+
+        /// Engine-space rect for a resized editor frame (view coordinates),
+        /// clamped to the page. nil when the editor was never resized.
+        private func resizedEngineRect(for editor: BlockEditorView, page: PDFPage) -> CGRect? {
+            guard let content = editor.resizedContentFrame() else { return nil }
+            let pageRect = convert(content, to: page)
+            let bounds = page.bounds(for: .cropBox)
+            let clamped = pageRect.intersection(bounds)
+            guard !clamped.isNull, clamped.width > 1, clamped.height > 1 else { return nil }
+            return engineRect(fromPDFKitRect: clamped, page: page)
         }
 
         private func engineOrigin(fromPDFKitRect rect: NSRect, page: PDFPage) -> (x: Double, y: Double) {

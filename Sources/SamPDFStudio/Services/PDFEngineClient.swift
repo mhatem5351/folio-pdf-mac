@@ -211,7 +211,11 @@ final class PDFEngineClient {
         lineHeight: Double = 0,
         trackOriginal: String? = nil,
         originalText: String? = nil,
-        colorRunsJSON: String? = nil
+        colorRunsJSON: String? = nil,
+        /// Box the replacement text is laid into when the user resized the
+        /// editor frame (engine coords, "x0,y0,x1,y1"). Erasing still follows
+        /// `rect`. Absent = render into `rect`, exactly as before.
+        renderRect: String? = nil
     ) throws -> EngineCommandResult {
         var args = [
             "replace-block",
@@ -256,6 +260,9 @@ final class PDFEngineClient {
         }
         if let colorRunsJSON, !colorRunsJSON.isEmpty {
             args.append(contentsOf: ["--color-runs", colorRunsJSON])
+        }
+        if let renderRect, !renderRect.isEmpty {
+            args.append(contentsOf: ["--render-rect", renderRect])
         }
         return try run(args)
     }

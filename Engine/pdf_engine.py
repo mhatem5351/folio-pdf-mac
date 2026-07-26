@@ -619,31 +619,189 @@ def cmd_crop_pages(args: argparse.Namespace) -> int:
     return respond(True, output=str(output), pages=[i + 1 for i in indexes])
 
 
+# A column break is a horizontal gap wider than the text's own spacing: at
+# least 0.9x the font size, never less than this many points.
+SEGMENT_MIN_GAP = 6.0
+# Two segments on consecutive lines belong to the same paragraph when their
+# x-ranges overlap by at least this fraction of the narrower one.
+SEGMENT_OVERLAP_RATIO = 0.4
+
+
+def spans_bbox(spans: list[dict[str, Any]]) -> list[float]:
+    """Union of the spans' bounding boxes."""
+    boxes = [s["bbox"] for s in spans if s.get("bbox")]
+    return [
+        min(b[0] for b in boxes),
+        min(b[1] for b in boxes),
+        max(b[2] for b in boxes),
+        max(b[3] for b in boxes),
+    ]
+
+
+def line_span_segments(line: dict[str, Any]) -> list[dict[str, Any]]:
+    """Split ONE raw dict line into column SEGMENTS.
+
+    PyMuPDF keeps everything on a shared baseline in a single line/block, so
+    an invoice row's description and its right-hand amount arrive merged.
+    Consecutive spans whose horizontal gap exceeds max(0.9 x fontsize, 6pt)
+    start a new segment, so each column stays independently clickable and
+    independently editable. Whitespace-only spans are padding: they join the
+    segment they sit inside and are dropped when they straddle a break."""
+    spans = sorted(
+        [s for s in line.get("spans", []) if s.get("bbox") and (s.get("text") or "")],
+        key=lambda s: s["bbox"][0],
+    )
+    segments: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []  # whitespace awaiting a break decision
+    last_content: dict[str, Any] | None = None
+    for span in spans:
+        if not (span.get("text") or "").strip():
+            pending.append(span)
+            continue
+        if last_content is not None:
+            gap = span["bbox"][0] - last_content["bbox"][2]
+            size = float(span.get("size") or last_content.get("size") or 10.0)
+            if gap > max(0.9 * size, SEGMENT_MIN_GAP):
+                segments.append(current)
+                current = []
+                pending = []  # padding that lived in the gap belongs to neither
+        current.extend(pending)
+        pending = []
+        current.append(span)
+        last_content = span
+    if current:
+        segments.append(current)
+
+    out: list[dict[str, Any]] = []
+    for group in segments:
+        text = "".join(s.get("text", "") for s in group)
+        if not text.strip():
+            continue
+        out.append({"spans": group, "text": text, "bbox": spans_bbox(group)})
+    return out
+
+
+def segment_rows(segments: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group segments into visual ROWS by vertical overlap.
+
+    A block's raw "lines" are not rows: PyMuPDF happily emits the left column,
+    the right column, and the left column's wrapped continuation as three
+    lines in drawing order. Rebuilding rows from geometry keeps a wrapped
+    paragraph together even when a column value was drawn between its lines."""
+    rows: list[list[dict[str, Any]]] = []
+    for segment in sorted(segments, key=lambda s: (round(s["bbox"][1], 1), s["bbox"][0])):
+        y0, y1 = segment["bbox"][1], segment["bbox"][3]
+        for row in rows:
+            row_y0 = min(s["bbox"][1] for s in row)
+            row_y1 = max(s["bbox"][3] for s in row)
+            overlap = min(y1, row_y1) - max(y0, row_y0)
+            shorter = min(y1 - y0, row_y1 - row_y0)
+            if shorter > 0 and overlap / shorter >= 0.6:
+                row.append(segment)
+                break
+        else:
+            rows.append([segment])
+    for row in rows:
+        row.sort(key=lambda s: s["bbox"][0])
+    rows.sort(key=lambda row: min(s["bbox"][1] for s in row))
+    return rows
+
+
+def segment_blocks(block: dict[str, Any]) -> list[dict[str, Any]]:
+    """Turn one raw dict block into column-aware SEGMENT blocks.
+
+    Each result is shaped exactly like a raw text block ({"type", "bbox",
+    "lines"}) so every downstream helper — block_payload above all — works on
+    it unchanged. Segments on consecutive lines merge into one paragraph when
+    their x-ranges overlap enough, so a wrapped left column stays a single
+    editable paragraph while the right column's amount stays on its own."""
+    segments: list[dict[str, Any]] = []
+    for line in block.get("lines", []):
+        segments.extend(line_span_segments(line))
+    rows = segment_rows(segments)
+    if not rows:
+        return []
+
+    groups: list[list[dict[str, Any]]] = []
+    previous: list[tuple[int, dict[str, Any]]] = []
+    for row in rows:
+        current: list[tuple[int, dict[str, Any]]] = []
+        taken: set[int] = set()
+        for segment in row:
+            x0, x1 = segment["bbox"][0], segment["bbox"][2]
+            best_index, best_ratio = -1, 0.0
+            for index, previous_segment in previous:
+                if index in taken:
+                    continue
+                px0, px1 = previous_segment["bbox"][0], previous_segment["bbox"][2]
+                overlap = min(x1, px1) - max(x0, px0)
+                narrower = min(x1 - x0, px1 - px0)
+                ratio = (overlap / narrower) if narrower > 0 else 0.0
+                if ratio >= SEGMENT_OVERLAP_RATIO and ratio > best_ratio:
+                    best_index, best_ratio = index, ratio
+            if best_index < 0:
+                groups.append([segment])
+                best_index = len(groups) - 1
+            else:
+                groups[best_index].append(segment)
+            taken.add(best_index)
+            current.append((best_index, segment))
+        previous = current
+
+    result = []
+    for group in groups:
+        boxes = [segment["bbox"] for segment in group]
+        result.append({
+            "type": 0,
+            "bbox": [
+                min(b[0] for b in boxes),
+                min(b[1] for b in boxes),
+                max(b[2] for b in boxes),
+                max(b[3] for b in boxes),
+            ],
+            "lines": [
+                {"bbox": segment["bbox"], "spans": segment["spans"]}
+                for segment in group
+            ],
+        })
+    return result
+
+
+def page_segment_blocks(page: Any) -> list[dict[str, Any]]:
+    """Every real text SEGMENT on the page, in raw-block shape."""
+    blocks = []
+    for block in page.get_text("dict").get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for segment in segment_blocks(block):
+            text = "".join(
+                span.get("text", "")
+                for line in segment.get("lines", [])
+                for span in line.get("spans", [])
+            )
+            # Generated PDFs often contain overlapping whitespace-only blocks;
+            # only real text is clickable.
+            if not text.strip():
+                continue
+            blocks.append(segment)
+    return blocks
+
+
 def find_text_block(page: Any, x: float, y: float) -> dict[str, Any] | None:
-    """Locate the text block containing (or nearest to) a page point."""
+    """Locate the text SEGMENT containing (or nearest to) a page point."""
     import fitz
 
     point = fitz.Rect(x - 1, y - 1, x + 1, y + 1)
     best = None
     best_score = None
-    for block in page.get_text("dict").get("blocks", []):
-        if block.get("type") != 0:
-            continue
-        bbox = block.get("bbox")
-        if not bbox:
-            continue
-        # Generated PDFs often contain overlapping whitespace-only blocks;
-        # only real text is clickable.
-        block_text = "".join(
-            span.get("text", "")
-            for line in block.get("lines", [])
-            for span in line.get("spans", [])
-        )
-        if not block_text.strip():
-            continue
-        rect = fitz.Rect(bbox)
+    for block in page_segment_blocks(page):
+        rect = fitz.Rect(block["bbox"])
         if rect.contains(fitz.Point(x, y)):
-            score = -1.0
+            # Containment always beats proximity; among containing segments the
+            # SMALLEST wins, so a click on the amount never picks up a bigger
+            # overlapping box.
+            score = -1_000_000.0 + rect.get_area()
         else:
             score = rect_proximity(point, rect)
             if score > 900:  # more than ~30pt away — not what was clicked
@@ -701,18 +859,7 @@ def cmd_page_blocks(args: argparse.Namespace) -> int:
         doc.close()
         return respond(False, message=f"page must be between 1 and {doc.page_count}")
     page = doc[args.page - 1]
-    blocks = []
-    for block in page.get_text("dict").get("blocks", []):
-        if block.get("type") != 0:
-            continue
-        text = "".join(
-            span.get("text", "")
-            for line in block.get("lines", [])
-            for span in line.get("spans", [])
-        )
-        if not text.strip():
-            continue
-        blocks.append(block_payload(block))
+    blocks = [block_payload(block) for block in page_segment_blocks(page)]
     doc.close()
     return respond(True, blocks=blocks)
 
@@ -999,6 +1146,21 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
         return respond(False, message="--rect is required")
     rect = fitz.Rect(rect_values)
 
+    # The box the NEW text is laid into. Defaults to the original block rect;
+    # a resized editor frame sends its own --render-rect so the replacement
+    # reflows at the width the user dragged out. Erasing always follows
+    # --rect (the original segment's lines), never this.
+    render_values = parse_rect(getattr(args, "render_rect", None))
+    render_rect = fitz.Rect(render_values) if render_values else fitz.Rect(rect)
+    # An explicit resize: the user picked this geometry, so it wins over every
+    # "keep it where it was" heuristic below (per-line replay, right-anchoring,
+    # the width headroom `--expand` adds for unresized edits).
+    resized = render_values is not None and (
+        abs(render_rect.x0 - rect.x0) > 0.5
+        or abs(render_rect.x1 - rect.x1) > 0.5
+        or abs(render_rect.y0 - rect.y0) > 0.5
+    )
+
     scratch_files: list[str] = []
     new_text = args.text
     # Per-word color spans (JSON: [{"start":int,"length":int,"hex":"#rrggbb"}]).
@@ -1015,8 +1177,7 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
     # Identify which lines inside the rect actually belong to this block —
     # content merely sharing the area must survive the edit untouched.
     original = args.original_text or new_text
-    lines_info = block_lines_info(page, rect) or []
-    block_lines, _foreign, complete = partition_block_lines(lines_info, original, rect)
+    lines_info, block_lines, complete = resolve_block_lines(page, rect, original)
     if not complete and args.original_text is None and len(lines_info) == len(new_text.split("\n")):
         # No original text supplied: fall back to count-based mapping.
         block_lines, complete = lines_info, True
@@ -1027,6 +1188,7 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
     new_lines = new_text.split("\n")
     per_line = (
         complete
+        and not resized
         and not args.font_size and not args.color and not args.bold and not args.font
         and not getattr(args, "italic", False) and not getattr(args, "underline", False)
         and getattr(args, "align", "left") == "left"
@@ -1056,8 +1218,32 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
                 per_line = False
                 break
 
+    # Right-edge anchoring: a SHORT single-line segment living in the right
+    # half of the page is a column value (an invoice amount). Re-rendering it
+    # from its left edge drifts it out of its column as the text gets longer
+    # or shorter, so pin its RIGHT edge where it already was.
+    right_anchor = None
+    if (
+        not resized
+        and len(new_lines) == 1
+        and len(block_lines) <= 1
+        and rect.x0 > 0.55 * page.rect.width
+        and 0 < len(new_text.strip()) <= 32
+        and getattr(args, "align", "left") == "left"
+        and not color_runs
+    ):
+        if per_line and per_line_fonts:
+            measure_kwargs, measure_size = per_line_fonts[0], block_lines[0]["fontsize"]
+        else:
+            measure_kwargs, measure_size = font_kwargs, float(style["fontsize"])
+        rendered = replacement_text_length(new_text, measure_kwargs, measure_size)
+        if rendered > 0:
+            # A longer amount has to grow LEFTWARD to keep its right edge, so
+            # the only floor here is the page itself.
+            right_anchor = max(page.rect.x0 + 2, rect.x1 - rendered)
+
     if block_lines:
-        erase_lines(page, block_lines)
+        erase_lines(page, block_lines, bound=rect)
     else:
         page.add_redact_annot(block_erase_rect(rect), fill=(1, 1, 1))
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
@@ -1066,7 +1252,7 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
     # color and background persist together in one operation.
     bg = parse_hex_color(args.background) if getattr(args, "background", None) else None
     if bg is not None:
-        page.draw_rect(fitz.Rect(rect) + (-2, -2, 2, 2), fill=bg, color=None, overlay=True)
+        page.draw_rect(fitz.Rect(render_rect) + (-2, -2, 2, 2), fill=bg, color=None, overlay=True)
 
     inserted = False
     if per_line and new_text.strip():
@@ -1078,16 +1264,20 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
             if font_choice.get("fontfile"):
                 kwargs["fontfile"] = font_choice["fontfile"]
             page.insert_text(
-                (line["origin"][0], line["origin"][1]),
+                (right_anchor if right_anchor is not None else line["origin"][0], line["origin"][1]),
                 text_line,
                 fontsize=line["fontsize"],
                 color=line["color"],
                 **kwargs,
             )
     elif new_text.strip():
+        origin_x = right_anchor if right_anchor is not None else render_rect.x0
+        # A dragged-out width is exact: no `--expand` headroom past its right
+        # edge, so the reflowed text stays inside the box the user drew.
+        expand = 0.0 if resized else args.expand
         inserted = render_block_text(
-            page, rect.x0, rect.y0, rect.width, new_text,
-            style, font_kwargs, args.line_height, args.expand,
+            page, origin_x, render_rect.y0, max(1.0, render_rect.x1 - origin_x), new_text,
+            style, font_kwargs, args.line_height, expand,
             align=align_constant(getattr(args, "align", "left")),
             color_runs=color_runs,
         )
@@ -1095,7 +1285,7 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
     # Track Changes: leave a dashed blue review box whose note holds the
     # original wording, so every edit stays reviewable.
     if inserted and args.track_original:
-        grown = fitz.Rect(rect) + (-2, -2, 2, 2)
+        grown = fitz.Rect(render_rect) + (-2, -2, 2, 2)
         annot = page.add_rect_annot(grown)
         annot.set_colors(stroke=(0.15, 0.4, 0.85))
         annot.set_border(width=1, dashes=[3, 2])
@@ -1116,10 +1306,15 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
     return respond(True, output=str(output), inserted=inserted)
 
 
-def block_lines_info(page: Any, rect: Any) -> list[dict[str, Any]] | None:
+def block_lines_info(page: Any, rect: Any, segmented: bool = True) -> list[dict[str, Any]] | None:
     """Per-line text, baseline origin, and dominant style for every text line
     inside rect — the same content the block erase removes — so edits and
-    moves can reproduce each line's exact position and styling."""
+    moves can reproduce each line's exact position and styling.
+
+    With `segmented` (the default) each line is first split into column
+    segments, so editing an invoice amount erases and re-renders ONLY the
+    amount, never the description sharing its baseline. Callers fall back to
+    whole lines when a segment match fails (older rects covered whole rows)."""
     import fitz
 
     target = fitz.Rect(rect) + (-1, -1, 1, 1)
@@ -1128,30 +1323,53 @@ def block_lines_info(page: Any, rect: Any) -> list[dict[str, Any]] | None:
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
-            spans = [s for s in line.get("spans", []) if s.get("text")]
-            if not spans:
-                continue
-            bbox = line.get("bbox")
-            if not bbox:
-                continue
-            center = fitz.Point((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
-            if not target.contains(center):
-                continue
-            dominant = max(
-                spans,
-                key=lambda s: max(0.0, (s["bbox"][2] - s["bbox"][0]) * (s["bbox"][3] - s["bbox"][1])),
-            )
-            lines.append({
-                "text": "".join(s["text"] for s in spans),
-                "origin": spans[0].get("origin"),
-                "bbox": bbox,
-                "rawfont": dominant.get("font"),
-                "fontsize": float(dominant.get("size") or 11),
-                "color": pdf_color_to_rgb(dominant.get("color")),
-                "sort_key": (round(bbox[1], 1), round(bbox[0], 1)),
-            })
+            if segmented:
+                pieces = line_span_segments(line)
+            else:
+                spans = [s for s in line.get("spans", []) if s.get("text")]
+                bbox = line.get("bbox")
+                pieces = [{
+                    "spans": spans,
+                    "bbox": bbox,
+                    "text": "".join(s["text"] for s in spans),
+                }] if (spans and bbox) else []
+            for piece in pieces:
+                spans, bbox = piece["spans"], piece["bbox"]
+                if not spans or not bbox:
+                    continue
+                center = fitz.Point((bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2)
+                if not target.contains(center):
+                    continue
+                dominant = max(
+                    spans,
+                    key=lambda s: max(0.0, (s["bbox"][2] - s["bbox"][0]) * (s["bbox"][3] - s["bbox"][1])),
+                )
+                lines.append({
+                    "text": piece["text"],
+                    "origin": spans[0].get("origin"),
+                    "bbox": list(bbox),
+                    "rawfont": dominant.get("font"),
+                    "fontsize": float(dominant.get("size") or 11),
+                    "color": pdf_color_to_rgb(dominant.get("color")),
+                    "sort_key": (round(bbox[1], 1), round(bbox[0], 1)),
+                })
     lines.sort(key=lambda line: line["sort_key"])
     return lines or None
+
+
+def resolve_block_lines(page: Any, rect: Any, original_text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    """Lines of the edited block inside `rect`, preferring column SEGMENTS and
+    falling back to whole lines when the caller's rect/original text describes
+    a whole row (rects recorded before column segmentation existed)."""
+    lines_info = block_lines_info(page, rect) or []
+    block_lines, foreign, complete = partition_block_lines(lines_info, original_text, rect)
+    if complete:
+        return lines_info, block_lines, complete
+    whole = block_lines_info(page, rect, segmented=False) or []
+    whole_lines, _whole_foreign, whole_complete = partition_block_lines(whole, original_text, rect)
+    if whole_complete:
+        return whole, whole_lines, True
+    return lines_info, block_lines, complete
 
 
 def partition_block_lines(lines_info: list[dict[str, Any]], original_text: str, rect: Any = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
@@ -1199,18 +1417,30 @@ def partition_block_lines(lines_info: list[dict[str, Any]], original_text: str, 
     return block_lines, foreign, complete
 
 
-def erase_lines(page: Any, lines: list[dict[str, Any]]) -> None:
+def erase_lines(page: Any, lines: list[dict[str, Any]], bound: Any = None) -> None:
     """Redact ONLY the given lines' own glyph areas (slightly shrunk), so
-    neighbors and content sharing the block's bounding box survive."""
+    neighbors and content sharing the block's bounding box survive.
+
+    `bound` (the edited block's own rect) clamps every erase to at most 1pt
+    outside it: redaction deletes any glyph its rect touches, so an erase that
+    ran past the block's edge clipped the neighbouring column's first glyph."""
     import fitz
 
+    limit = fitz.Rect(bound) if bound is not None else None
     for line in lines:
         rect = fitz.Rect(line["bbox"])
         shrink = min(0.75, rect.height * 0.15)
-        page.add_redact_annot(
-            fitz.Rect(rect.x0 + shrink, rect.y0 + shrink, rect.x1 - shrink, rect.y1 - shrink),
-            fill=(1, 1, 1),
-        )
+        erase = fitz.Rect(rect.x0 + shrink, rect.y0 + shrink, rect.x1 - shrink, rect.y1 - shrink)
+        if limit is not None:
+            erase = fitz.Rect(
+                max(erase.x0, limit.x0 - 1.0),
+                max(erase.y0, limit.y0 - 1.0),
+                min(erase.x1, limit.x1 + 1.0),
+                min(erase.y1, limit.y1 + 1.0),
+            )
+        if erase.width <= 0 or erase.height <= 0:
+            continue
+        page.add_redact_annot(erase, fill=(1, 1, 1))
     page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
 
@@ -1243,8 +1473,7 @@ def cmd_move_block(args: argparse.Namespace) -> int:
 
     scratch_files: list[str] = []
     original = args.original_text or text
-    lines_info = block_lines_info(page, rect) or []
-    block_lines, _foreign, complete = partition_block_lines(lines_info, original, rect)
+    _lines_info, block_lines, complete = resolve_block_lines(page, rect, original)
 
     pure_move = (
         complete
@@ -1274,7 +1503,7 @@ def cmd_move_block(args: argparse.Namespace) -> int:
     # Erase ONLY the block's own lines: content that merely shares the
     # block's bounding box (or sits in the drag path) is never touched.
     if block_lines:
-        erase_lines(page, block_lines)
+        erase_lines(page, block_lines, bound=rect)
     else:
         page.add_redact_annot(block_erase_rect(rect), fill=(1, 1, 1))
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
@@ -2440,6 +2669,9 @@ def build_parser() -> argparse.ArgumentParser:
     replace_block.add_argument("--output", required=True)
     replace_block.add_argument("--page", type=int, required=True)
     replace_block.add_argument("--rect", required=True)
+    # Where the replacement text is laid out (default: --rect). Set when the
+    # user resized the editor frame; erasing still follows --rect.
+    replace_block.add_argument("--render-rect", default=None)
     replace_block.add_argument("--text", required=True)
     replace_block.add_argument("--font-size", type=float, default=0)
     replace_block.add_argument("--font", default=None)
