@@ -7,7 +7,9 @@ BUNDLE_ID="com.sam.private.SamPDFStudio"
 MIN_SYSTEM_VERSION="14.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DIST_DIR="$ROOT_DIR/dist"
+# Build output lives OUTSIDE iCloud-synced folders — syncing an .app bundle
+# mid-write corrupts it and litters " 2" duplicates. Override with SAMPDF_DIST_DIR.
+DIST_DIR="${SAMPDF_DIST_DIR:-$HOME/Builds/SamPDFStudio}"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
@@ -93,6 +95,9 @@ open_app() {
 }
 
 case "$MODE" in
+  build)
+    echo "✓ built $APP_BUNDLE"
+    ;;
   run)
     open_app
     ;;
