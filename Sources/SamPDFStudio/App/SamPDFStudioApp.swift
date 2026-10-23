@@ -158,9 +158,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
+        DebugSnapshot.install()
         // First launch of a distributed .app has no Python engine venv yet;
         // install it (blocking the UI behind an overlay) before the user works.
         store.bootstrapEngineIfNeeded()
+    }
+
+    /// Finder "Open With", double-click on a PDF, and `open -a … file.pdf`.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let url = urls.first(where: { $0.pathExtension.lowercased() == "pdf" }) else { return }
+        store.loadPDF(url, checkDirty: true)
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

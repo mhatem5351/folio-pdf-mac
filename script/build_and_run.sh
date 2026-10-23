@@ -74,6 +74,21 @@ cat >"$INFO_PLIST" <<PLIST
   <string>APPL</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>PDF Document</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>com.adobe.pdf</string>
+      </array>
+    </dict>
+  </array>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSPrincipalClass</key>
