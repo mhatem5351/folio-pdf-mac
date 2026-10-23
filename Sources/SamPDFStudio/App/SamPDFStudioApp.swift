@@ -6,12 +6,13 @@ struct SamPDFStudioApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup("Sam PDF Studio") {
+        WindowGroup("PDF Studio") {
             ContentView()
                 .environmentObject(appDelegate.store)
-                .frame(minWidth: 1000, minHeight: 660)
-                .navigationTitle(appDelegate.store.documentName)
+                .frame(minWidth: 1040, minHeight: 680)
+                .tint(Theme.accent)
         }
+        .windowToolbarStyle(.unified(showsTitle: true))
         .commands {
             AppCommands(store: appDelegate.store)
         }
@@ -23,7 +24,7 @@ private struct AppCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .appInfo) {
-            Button("About Sam PDF Studio") {
+            Button("About PDF Studio") {
                 showAboutPanel()
             }
         }
@@ -101,6 +102,70 @@ private struct AppCommands: Commands {
             }
             .keyboardShortcut("z", modifiers: [.command, .shift])
             .disabled(!store.canRedo || store.busy)
+        }
+
+        CommandGroup(after: .saveItem) {
+            Divider()
+            Button("Print to HP LaserJet…") {
+                store.launch(.printHP)
+            }
+            .keyboardShortcut("p")
+            .disabled(store.document == nil || store.busy)
+
+            Button("Print with System Dialog…") {
+                store.launch(.print)
+            }
+            .keyboardShortcut("p", modifiers: [.command, .option])
+            .disabled(store.document == nil || store.busy)
+        }
+
+        CommandGroup(replacing: .printItem) {}
+
+        CommandMenu("Tools") {
+            Button("Command Palette…") {
+                store.showCommandPalette = true
+            }
+            .keyboardShortcut("k")
+
+            Button("All Tools…") {
+                store.showToolsHub = true
+            }
+            .keyboardShortcut("t", modifiers: [.command, .shift])
+
+            Divider()
+
+            ForEach(ToolCategory.allCases) { category in
+                Menu(category.title) {
+                    ForEach(ToolID.allCases.filter { $0.category == category }) { tool in
+                        Button(tool.title) { store.launch(tool) }
+                            .disabled(store.document == nil && !tool.worksWithoutDocument)
+                    }
+                }
+            }
+        }
+
+        CommandGroup(after: .sidebar) {
+            Button("Find in Document") {
+                store.showSidebar = true
+                store.sidebarTab = .search
+            }
+            .keyboardShortcut("f")
+            .disabled(store.document == nil)
+
+            Divider()
+
+            Button("Zoom In") { store.zoom(by: 1.2) }
+                .keyboardShortcut("+")
+                .disabled(store.document == nil)
+            Button("Zoom Out") { store.zoom(by: 1 / 1.2) }
+                .keyboardShortcut("-")
+                .disabled(store.document == nil)
+            Button("Actual Size") { store.setZoom(1) }
+                .keyboardShortcut("0")
+                .disabled(store.document == nil)
+            Button("Fit Width") { store.pdfViewProxy.pdfView?.autoScales = true }
+                .keyboardShortcut("9")
+                .disabled(store.document == nil)
         }
 
         CommandMenu("Go") {

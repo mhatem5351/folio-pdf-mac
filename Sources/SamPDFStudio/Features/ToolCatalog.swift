@@ -146,7 +146,7 @@ enum ToolID: String, CaseIterable, Identifiable {
     /// Presented as a sheet via ToolSheetHost (vs. a direct action).
     var opensSheet: Bool {
         switch self {
-        case .redact, .print, .printHP, .exportOffice: false
+        case .redact, .print, .exportOffice: false
         default: true
         }
     }

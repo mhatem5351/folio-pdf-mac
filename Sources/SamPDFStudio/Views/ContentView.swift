@@ -8,25 +8,28 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            TopBarView()
-            Divider()
-
             if store.document != nil && store.selectedOperation != .read {
                 ToolStripView()
-                Divider()
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                Divider().overlay(Theme.separator)
             }
 
             HStack(spacing: 0) {
                 if store.showSidebar, store.document != nil, store.selectedOperation != .pages {
-                    PDFThumbnailRailView()
-                        .frame(width: 168)
-                        .background(Color(nsColor: .underPageBackgroundColor))
-                    Divider()
+                    DocumentSidebar()
+                        .frame(width: 212)
+                        .transition(.move(edge: .leading))
+                    Divider().overlay(Theme.separator)
                 }
 
                 PDFWorkspaceView()
             }
         }
+        .animation(.easeInOut(duration: 0.2), value: store.selectedOperation == .read)
+        .background(Theme.canvas)
+        .toolbar { MainToolbar(store: store) }
+        .navigationTitle(store.document == nil ? "PDF Studio" : store.documentName)
+        .navigationSubtitle(store.document == nil ? "" : "\(store.pageCount) page\(store.pageCount == 1 ? "" : "s")\(store.isDirty ? " · Edited" : "")")
         .overlay(alignment: .topTrailing) {
             if store.activeBlock != nil || store.newTextDraft != nil {
                 // GeometryReader gives the panel the window area it must stay
@@ -43,7 +46,7 @@ struct ContentView: View {
         .overlay(alignment: .bottom) {
             if !store.lastMessage.isEmpty {
                 ToastView(message: store.lastMessage)
-                    .padding(.bottom, 18)
+                    .padding(.bottom, store.document == nil ? 18 : 70)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
@@ -73,6 +76,14 @@ struct ContentView: View {
         }
         .sheet(isPresented: $store.showSignatureManager) {
             SignatureManagerView()
+        }
+        .sheet(isPresented: $store.showToolsHub) {
+            ToolsHubView()
+                .environmentObject(store)
+        }
+        .sheet(isPresented: $store.showCommandPalette) {
+            CommandPaletteView()
+                .environmentObject(store)
         }
         .sheet(item: $store.activeTool) { tool in
             ToolSheetHost(tool: tool)
@@ -172,122 +183,6 @@ private struct EngineSetupOverlayView: View {
 
 // MARK: - Top bar
 
-private struct TopBarView: View {
-    @EnvironmentObject private var store: AppStore
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Button {
-                store.showSidebar.toggle()
-            } label: {
-                Image(systemName: "sidebar.left")
-            }
-            .help("Show or hide page thumbnails")
-            .disabled(store.document == nil)
-
-            Button {
-                store.openPDF()
-            } label: {
-                Image(systemName: "folder")
-            }
-            .help("Open a PDF (⌘O)")
-
-            Spacer(minLength: 8)
-
-            Picker("", selection: modeBinding) {
-                ForEach(PDFOperation.allCases) { mode in
-                    Text(mode.title).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 560)
-            .disabled(store.document == nil)
-
-            Spacer(minLength: 8)
-
-            if store.busy {
-                ProgressView()
-                    .controlSize(.small)
-                Text(store.busyTitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
-            Button {
-                store.undo()
-            } label: {
-                Image(systemName: "arrow.uturn.backward")
-            }
-            .help("Undo (⌘Z)")
-            .disabled(!store.canUndo || store.busy)
-
-            Button {
-                store.redo()
-            } label: {
-                Image(systemName: "arrow.uturn.forward")
-            }
-            .help("Redo (⇧⌘Z)")
-            .disabled(!store.canRedo || store.busy)
-
-            ExportMenuView()
-
-            Button {
-                store.save()
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "square.and.arrow.down")
-                    if store.isDirty {
-                        Circle()
-                            .fill(.orange)
-                            .frame(width: 7, height: 7)
-                    }
-                }
-            }
-            .help("Save changes to the original file (⌘S)")
-            .disabled(store.document == nil || !store.isDirty || store.busy)
-        }
-        .buttonStyle(.borderless)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(.bar)
-    }
-
-    private var modeBinding: Binding<PDFOperation> {
-        Binding(
-            get: { store.selectedOperation },
-            set: { store.selectedOperation = $0 }
-        )
-    }
-}
-
-private struct ExportMenuView: View {
-    @EnvironmentObject private var store: AppStore
-
-    var body: some View {
-        Menu {
-            Button("PDF Copy…") { store.exportPDFCopy() }
-            Divider()
-            Button("Word…") { store.exportOffice(.word) }
-            Button("Excel…") { store.exportOffice(.excel) }
-            Button("PowerPoint…") { store.exportOffice(.powerpoint) }
-            Divider()
-            Button("Text…") { store.exportText(.text) }
-            Button("Markdown…") { store.exportText(.markdown) }
-            Button("HTML…") { store.exportText(.html) }
-            Divider()
-            Button("PNG Images…") { store.exportImages(.png) }
-            Button("JPG Images…") { store.exportImages(.jpg) }
-        } label: {
-            Image(systemName: "square.and.arrow.up")
-        }
-        .menuIndicator(.hidden)
-        .help("Export")
-        .disabled(store.document == nil || store.busy)
-    }
-}
-
 // MARK: - Tool strip
 
 private struct ToolStripView: View {
@@ -312,14 +207,25 @@ private struct ToolStripView: View {
                 ocrTools
             }
             Spacer()
-            Text(hint)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            if !hint.isEmpty {
+                HStack(spacing: 5) {
+                    Image(systemName: "lightbulb")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(Theme.warning)
+                    Text(hint)
+                        .font(Theme.Font.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Theme.surfaceRaised.opacity(0.7)))
+            }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(.regularMaterial)
+        .controlSize(.small)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(Theme.chrome)
     }
 
     private static let markupSwatches: [(name: String, hex: String)] = [
@@ -622,9 +528,7 @@ private struct ToolButton: View {
         Button(action: action) {
             Label(title, systemImage: systemImage)
         }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .tint(isSelected ? Color.accentColor : nil)
+        .buttonStyle(ToolChipStyle(isActive: isSelected))
     }
 }
 

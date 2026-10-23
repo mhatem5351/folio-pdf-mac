@@ -22,7 +22,8 @@ struct ToolSheetHost: View {
         case .ocr: OCRSheet()
         case .convertToPDF: ConvertToPDFSheet()
         case .compare: CompareSheet()
-        case .redact, .exportOffice, .printHP, .print:
+        case .printHP: LaserJetPrintSheet()
+        case .redact, .exportOffice, .print:
             ToolPlaceholder(tool: tool)
         }
     }

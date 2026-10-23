@@ -186,6 +186,10 @@ final class AppStore: ObservableObject {
     @Published var activeTool: ToolID?
     /// Command palette (⌘K) visibility.
     @Published var showCommandPalette: Bool = false
+    /// "All Tools" hub sheet visibility.
+    @Published var showToolsHub: Bool = false
+    /// Which panel the left sidebar shows.
+    @Published var sidebarTab: SidebarTab = .pages
     @Published var recentFiles: [URL] = []
 
     // Canvas selection state (engine coordinates).
@@ -340,7 +344,7 @@ final class AppStore: ObservableObject {
     private var regionClipboard: PDFRegionClipboard?
 
     var currentPDFURL: URL? { session?.currentURL }
-    var documentName: String { session?.originalURL.lastPathComponent ?? "Sam PDF Studio" }
+    var documentName: String { session?.originalURL.lastPathComponent ?? "PDF Studio" }
 
     init() {
         signatureText = UserDefaults.standard.string(forKey: "signatureText") ?? "Sam Wasserman"

@@ -29,8 +29,18 @@ enum DebugSnapshot {
     }
 
     static func capture(to url: URL) {
-        guard let window = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible }),
-              let frameView = window.contentView?.superview else { return }
+        // Main document window → url; an attached sheet → "<name>-sheet.png".
+        guard let main = NSApp.windows.first(where: { $0.isVisible && $0.sheetParent == nil && $0.canBecomeMain })
+                ?? NSApp.keyWindow else { return }
+        if let sheet = main.attachedSheet {
+            let sheetURL = url.deletingPathExtension().appendingPathExtension("sheet.png")
+            capture(window: sheet, to: sheetURL)
+        }
+        capture(window: main, to: url)
+    }
+
+    private static func capture(window: NSWindow, to url: URL) {
+        guard let frameView = window.contentView?.superview else { return }
         // Window-server capture of our own window includes PDFKit's tiled page
         // layers; cacheDisplay (fallback) leaves the PDF page area blank.
         if let cg = CGWindowListCreateImage(.null, .optionIncludingWindow,

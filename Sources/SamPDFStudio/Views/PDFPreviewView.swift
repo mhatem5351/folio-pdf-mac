@@ -2119,7 +2119,8 @@ struct PDFPreviewView: NSViewRepresentable {
         view.displayMode = .singlePageContinuous
         view.displayDirection = .vertical
         view.displaysPageBreaks = true
-        view.backgroundColor = NSColor.underPageBackgroundColor
+        view.backgroundColor = NSColor(Theme.canvas)
+        view.pageShadowsEnabled = true
         view.document = document
         pdfViewProxy.pdfView = view
         context.coordinator.observer = NotificationCenter.default.addObserver(
@@ -2156,12 +2157,19 @@ struct PDFPreviewView: NSViewRepresentable {
             editingView.window?.invalidateCursorRects(for: editingView)
         }
         if nsView.document !== document {
+            // Keep the user's zoom across in-place version swaps; only fit
+            // to width when nothing has been zoomed yet.
+            let keepScale = nsView.document != nil && !nsView.autoScales ? nsView.scaleFactor : nil
             nsView.document = document
+            if let keepScale {
+                nsView.scaleFactor = keepScale
+            } else {
+                nsView.autoScales = true
+            }
             if let editingView = nsView as? EditingPDFView {
                 editingView.clearTransientEditors()
             }
         }
-        nsView.autoScales = true
         pdfViewProxy.pdfView = nsView
     }
 

@@ -3,14 +3,14 @@ set -euo pipefail
 
 MODE="${1:-run}"
 APP_NAME="SamPDFStudio"
-BUNDLE_ID="com.sam.private.SamPDFStudio"
+BUNDLE_ID="local.pdfstudio.app"
 MIN_SYSTEM_VERSION="14.0"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Build output lives OUTSIDE iCloud-synced folders — syncing an .app bundle
 # mid-write corrupts it and litters " 2" duplicates. Override with SAMPDF_DIST_DIR.
 DIST_DIR="${SAMPDF_DIST_DIR:-$HOME/Builds/SamPDFStudio}"
-APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
+APP_BUNDLE="$DIST_DIR/PDF Studio.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_BINARY="$APP_MACOS/$APP_NAME"
@@ -65,13 +65,13 @@ cat >"$INFO_PLIST" <<PLIST
   <key>CFBundleIdentifier</key>
   <string>$BUNDLE_ID</string>
   <key>CFBundleName</key>
-  <string>Sam PDF Studio</string>
+  <string>PDF Studio</string>
   <key>CFBundleShortVersionString</key>
-  <string>1.0.0</string>
+  <string>2.0.0</string>
   <key>CFBundleVersion</key>
   <string>1.0.0</string>
   <key>NSHumanReadableCopyright</key>
-  <string>Copyright © 2026 Sam Wasserman · wassermanproductions.com</string>
+  <string>Based on Sam PDF Studio by Sam Wasserman (Apache-2.0)</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundlePackageType</key>
