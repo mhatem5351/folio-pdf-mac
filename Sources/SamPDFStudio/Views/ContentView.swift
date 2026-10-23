@@ -743,13 +743,15 @@ private struct TextStylePanel: View {
     /// Draggable title bar: the whole row moves the panel, with a subtle grip
     /// affordance on the right.
     private func dragHeader(_ title: String) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
+            IconTile(systemImage: "textformat", tint: Theme.accent, size: 24)
             Text(title)
-                .font(.headline)
+                .font(Theme.Font.headline)
+                .foregroundStyle(Theme.textPrimary)
             Spacer(minLength: 8)
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Theme.textTertiary)
         }
         .contentShape(Rectangle())
         .help("Drag to move this panel")
@@ -851,8 +853,8 @@ private struct TextStylePanel: View {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text("Text Color")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
+                            .font(Theme.Font.sectionLabel)
+                            .foregroundStyle(Theme.textTertiary)
                         Spacer()
                         ColorPicker("", selection: Binding(
                             get: { Color(nsColor: NSColor(engineHex: block.colorHex) ?? .black) },
@@ -884,8 +886,8 @@ private struct TextStylePanel: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Background")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .font(Theme.Font.sectionLabel)
+                        .foregroundStyle(Theme.textTertiary)
                     HStack(spacing: 8) {
                         // "None" clears any pending background shading.
                         Button {
@@ -927,23 +929,27 @@ private struct TextStylePanel: View {
                 }
 
                 HStack(spacing: 6) {
+                    Image(systemName: "cursorarrow.click")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.textTertiary)
                     Text("Click away to apply")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .font(Theme.Font.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                    Spacer(minLength: 4)
                     Button("Cancel (esc)") {
                         store.cancelActiveEditing()
                     }
                     .buttonStyle(.plain)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.caption.weight(.medium))
+                    .foregroundStyle(Theme.accent)
                     .help("Close without applying (Esc)")
                 }
             }
             .padding(14)
-            .frame(width: 210)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
-            .shadow(color: .black.opacity(0.18), radius: 10, y: 3)
+            .frame(width: 236)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous).strokeBorder(Theme.separator))
+            .shadow(color: Theme.floatingShadow, radius: 20, y: 6)
         }
     }
 
@@ -1016,8 +1022,8 @@ private struct TextStylePanel: View {
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text("Text Color")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
+                            .font(Theme.Font.sectionLabel)
+                            .foregroundStyle(Theme.textTertiary)
                         Spacer()
                         ColorPicker("", selection: Binding(
                             get: { Color(nsColor: NSColor(engineHex: draft.colorHex) ?? .black) },
@@ -1048,23 +1054,27 @@ private struct TextStylePanel: View {
                 }
 
                 HStack(spacing: 6) {
+                    Image(systemName: "cursorarrow.click")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.textTertiary)
                     Text("Click away to apply")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .font(Theme.Font.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                    Spacer(minLength: 4)
                     Button("Cancel (esc)") {
                         store.cancelActiveEditing()
                     }
                     .buttonStyle(.plain)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(Theme.Font.caption.weight(.medium))
+                    .foregroundStyle(Theme.accent)
                     .help("Close without applying (Esc)")
                 }
             }
             .padding(14)
-            .frame(width: 210)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.quaternary))
-            .shadow(color: .black.opacity(0.18), radius: 10, y: 3)
+            .frame(width: 236)
+            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.large, style: .continuous).strokeBorder(Theme.separator))
+            .shadow(color: Theme.floatingShadow, radius: 20, y: 6)
         }
     }
 

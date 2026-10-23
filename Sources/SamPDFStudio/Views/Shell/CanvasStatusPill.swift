@@ -16,13 +16,22 @@ struct CanvasStatusPill: View {
                 .help("Previous page")
 
             HStack(spacing: 4) {
-                TextField("", text: $pageField)
-                    .textFieldStyle(.plain)
-                    .multilineTextAlignment(.center)
-                    .font(Theme.Font.callout.monospacedDigit().weight(.semibold))
-                    .frame(width: 30)
-                    .focused($editingPage)
-                    .onSubmit(jump)
+                ZStack {
+                    // Live page number; the field underneath takes typing.
+                    if pageField.isEmpty && !editingPage {
+                        Text("\(tracker.pageIndex + 1)")
+                            .font(Theme.Font.callout.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(Theme.textPrimary)
+                            .allowsHitTesting(false)
+                    }
+                    TextField("", text: $pageField)
+                        .textFieldStyle(.plain)
+                        .multilineTextAlignment(.center)
+                        .font(Theme.Font.callout.monospacedDigit().weight(.semibold))
+                        .focused($editingPage)
+                        .onSubmit(jump)
+                }
+                .frame(width: 30)
                 Text("of \(store.pageCount)")
                     .font(Theme.Font.callout.monospacedDigit())
                     .foregroundStyle(Theme.textSecondary)
@@ -70,13 +79,7 @@ struct CanvasStatusPill: View {
         .background(Theme.surface.opacity(0.75), in: Capsule())
         .overlay(Capsule().strokeBorder(Theme.separator))
         .shadow(color: Theme.floatingShadow, radius: 14, y: 4)
-        .onAppear {
-            tracker.attach(store.pdfViewProxy)
-            pageField = "\(tracker.pageIndex + 1)"
-        }
-        .onChange(of: tracker.pageIndex) { _, index in
-            if !editingPage { pageField = "\(index + 1)" }
-        }
+        .onAppear { tracker.attach(store.pdfViewProxy) }
     }
 
     private var view: PDFView? { store.pdfViewProxy.pdfView }
@@ -91,12 +94,13 @@ struct CanvasStatusPill: View {
         editingPage = false
         guard let view, let document = view.document,
               let number = Int(pageField.trimmingCharacters(in: .whitespaces)) else {
-            pageField = "\(tracker.pageIndex + 1)"
+            pageField = ""
             return
         }
         let target = min(max(number - 1, 0), document.pageCount - 1)
         if let page = document.page(at: target) { view.go(to: page) }
-        pageField = "\(target + 1)"
+        // Empty field shows the live page number as its placeholder.
+        pageField = ""
     }
 
     private func zoom(by factor: CGFloat) {
