@@ -1794,7 +1794,8 @@ final class AppStore: ObservableObject {
         var savedResult: (before: Int, after: Int)?
         runEngineOp(title: "Reduce File Size", onDone: { [weak self] in
             if let result = savedResult, result.before > 0 {
-                let percent = 100 - Int(Double(result.after) / Double(result.before) * 100)
+                // Round the saving down so a 99.9% reduction never reads "−100%".
+                let percent = Int(((1 - Double(result.after) / Double(result.before)) * 100).rounded(.down))
                 let formatter = ByteCountFormatter()
                 self?.lastMessage = percent > 0
                     ? "Reduced \(formatter.string(fromByteCount: Int64(result.before))) → \(formatter.string(fromByteCount: Int64(result.after))) (−\(percent)%)"
@@ -1955,7 +1956,9 @@ final class AppStore: ObservableObject {
     }
 
     /// Run an engine command from the current version into the next version.
-    func runEngineOp(title: String, onDone: (() -> Void)? = nil, work: @escaping (URL, URL) throws -> Void) {
+    /// `title` names the action (busy pill, "<title> failed."); `success` is
+    /// the toast shown when it finishes (defaults to `title`).
+    func runEngineOp(title: String, success: String? = nil, onDone: (() -> Void)? = nil, work: @escaping (URL, URL) throws -> Void) {
         guard let session else {
             toast("Open a PDF first")
             return
@@ -1983,7 +1986,7 @@ final class AppStore: ObservableObject {
                     self.clearCanvasSelection()
                     self.refreshHistoryState()
                     self.restoreScrollPosition(position)
-                    self.toast(title)
+                    self.toast(success ?? title)
                     onDone?()
                 }
             } catch {

@@ -48,7 +48,7 @@ extension AppStore {
     // MARK: Operations on the open document (undoable)
 
     func applyWatermark(_ options: WatermarkOptions) {
-        runEngineOp(title: "Watermark added") { [engine] input, output in
+        runEngineOp(title: "Add Watermark", success: "Watermark added") { [engine] input, output in
             _ = try engine.watermark(input: input, output: output, options: options)
         }
     }
@@ -58,14 +58,14 @@ extension AppStore {
         if options.filename == nil { options.filename = stampsDocumentFilename }
         if options.title == nil { options.title = stampsDocumentTitle }
         let finalOptions = options
-        runEngineOp(title: "Header & footer added") { [engine] input, output in
+        runEngineOp(title: "Add Header & Footer", success: "Header & footer added") { [engine] input, output in
             _ = try engine.headerFooter(input: input, output: output, options: finalOptions)
         }
     }
 
     func applyBates(_ options: BatesOptions) {
         let box = BatesResultBox()
-        runEngineOp(title: "Bates numbers added", onDone: { [weak self] in
+        runEngineOp(title: "Add Bates Numbers", success: "Bates numbers added", onDone: { [weak self] in
             guard let result = box.value else { return }
             self?.toast(result.first == result.last
                         ? "Bates number \(result.first) added"

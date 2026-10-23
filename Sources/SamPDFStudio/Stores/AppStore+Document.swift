@@ -77,7 +77,7 @@ extension AppStore {
 
     /// Remove encryption from the open document as a new (undoable) version.
     func unlockDocument(password: String, onDone: (() -> Void)? = nil) {
-        runEngineOp(title: "Password removed", onDone: onDone) { [engine] input, output in
+        runEngineOp(title: "Remove Password", success: "Password removed", onDone: onDone) { [engine] input, output in
             try engine.unlock(input: input, output: output, password: password)
         }
     }
@@ -95,7 +95,7 @@ extension AppStore {
 
     func flattenDocument(_ target: FlattenTarget, onDone: (() -> Void)? = nil) {
         let counts = ResultBox<(annotations: Int, fields: Int)>()
-        runEngineOp(title: "Flattened", onDone: { [weak self] in
+        runEngineOp(title: "Flatten", success: "Flattened", onDone: { [weak self] in
             if let value = counts.value {
                 var parts: [String] = []
                 if value.annotations > 0 { parts.append(Self.plural(value.annotations, "annotation")) }
