@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // MARK: - Buttons
@@ -118,6 +119,13 @@ struct ToolSheetScaffold<Content: View>: View {
     var onSubmit: () -> Void
     @ViewBuilder var content: () -> Content
     @Environment(\.dismiss) private var dismiss
+    @State private var contentHeight: CGFloat = 320
+    /// Keep header + body + footer inside the parent window (a sheet taller
+    /// than its window gets clipped at the top).
+    private var maxContentHeight: CGFloat {
+        let window = NSApp.mainWindow?.frame.height ?? 800
+        return max(240, min(600, window - 250))
+    }
 
     init(
         title: String,
@@ -192,8 +200,16 @@ struct ToolSheetScaffold<Content: View>: View {
                 }
                 .padding(Theme.Spacing.xl)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    GeometryReader { proxy in
+                        Color.clear.preference(key: SheetContentHeightKey.self, value: proxy.size.height)
+                    }
+                )
             }
-            .frame(maxHeight: 520)
+            // A ScrollView has no natural height inside a sheet: size it to
+            // the measured content, scrolling only past the cap.
+            .frame(height: min(max(contentHeight, 120), maxContentHeight))
+            .onPreferenceChange(SheetContentHeightKey.self) { contentHeight = $0 }
 
             Divider().overlay(Theme.separator)
 
@@ -214,6 +230,13 @@ struct ToolSheetScaffold<Content: View>: View {
         }
         .frame(width: width)
         .background(Theme.surface)
+    }
+}
+
+private struct SheetContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
