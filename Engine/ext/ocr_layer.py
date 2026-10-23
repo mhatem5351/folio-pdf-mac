@@ -13,8 +13,10 @@ LINES.json (engine coordinates: unrotated crop box, top-left origin, points):
 Every line becomes invisible text (render mode 3) laid along the quad's
 baseline and stretched horizontally to the quad's width, so selection
 highlights cover the visible words. Glyphs are written in visual order with a
-ToUnicode map back to the logical characters (see ext/_rtl_text.py), so
-Arabic lines search and copy correctly in PDFKit and PyMuPDF.
+ToUnicode map back to the logical characters, and mixed Arabic / digit /
+Latin lines also carry their logical text as /ActualText (see
+ext/_rtl_text.py GlyphWriter), so lines search, copy and extract in logical
+order in PDFKit, PyMuPDF and other readers.
 
 Reply: {"ok": true, "output": ..., "pages": N, "lines": M, "skipped_lines": K}
 """

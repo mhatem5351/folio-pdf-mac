@@ -73,7 +73,7 @@ def search_terms(text: str) -> list[str]:
 
 def search_rects(page: Any, text: str) -> list[Any]:
     for term in search_terms(text):
-        rects = page.search_for(term)
+        rects = page.search_for(term, flags=rtl_module().glyph_flags("search"))
         if rects:
             return merge_touching_rects(rects) if text_has_rtl(term) else rects
     return []
@@ -194,7 +194,7 @@ def draw_text_underlines(page: Any, clip: Any, color: Any, width: float = 0.6) -
 
     clip_rect = fitz.Rect(clip)
     stroke = color or (0, 0, 0)
-    for block in page.get_text("dict", clip=clip_rect).get("blocks", []):
+    for block in page.get_text("dict", clip=clip_rect, flags=rtl_module().glyph_flags("dict")).get("blocks", []):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
@@ -212,7 +212,7 @@ def draw_text_underlines(page: Any, clip: Any, color: Any, width: float = 0.6) -
 
 
 def style_for_rect(page: Any, rect: Any) -> dict[str, Any]:
-    data = page.get_text("dict")
+    data = page.get_text("dict", flags=rtl_module().glyph_flags("dict"))
     best_span: dict[str, Any] | None = None
     best_area = 0.0
     for block in data.get("blocks", []):
@@ -429,7 +429,10 @@ def natural_align(args: argparse.Namespace) -> bool:
 def text_dict(page: Any, clip: Any = None) -> dict[str, Any]:
     """page.get_text("dict") with per-character data kept (rawdict) and every
     span's "text" filled in, so RTL rows can be rebuilt in logical order."""
-    data = page.get_text("rawdict", clip=clip) if clip is not None else page.get_text("rawdict")
+    # Real glyph boxes (not /ActualText, see _rtl_text.glyph_flags).
+    flags = rtl_module().glyph_flags("rawdict")
+    data = page.get_text("rawdict", clip=clip, flags=flags) if clip is not None else page.get_text("rawdict", flags=flags)
+    rtl_module().prepare_glyph_chars(page, data)
     repairs = rtl_module().broken_text_repairs(page) if any(
         entry[2] == "Type0" for entry in page.get_fonts(full=True)
     ) else {}
@@ -3335,6 +3338,8 @@ def main() -> int:
     args = parser.parse_args()
     normalize_text_args(args)
     try:
+        # Redaction must not leave removed words in RTL lines' /ActualText.
+        rtl_module().install_redaction_guard()
         return args.func(args)
     except Exception as exc:
         return respond(False, message=str(exc), traceback=traceback.format_exc(limit=8))

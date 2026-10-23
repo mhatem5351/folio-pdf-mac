@@ -237,7 +237,9 @@ def main() -> None:
            "--rect", rect_str(target["rect"]), "--text", target["text"].replace("\n", " "),
            "--original-text", target["text"], "--color-runs", runs)
     with pymupdf.open(str(step6)) as doc:
-        colors = {span["color"] for b in doc[0].get_text("dict", clip=pymupdf.Rect(target["rect"]) + (-60, -2, 2, 60))["blocks"]
+        # Glyph colors: read the glyphs themselves, not the lines' ActualText.
+        colors = {span["color"] for b in doc[0].get_text("dict", clip=pymupdf.Rect(target["rect"]) + (-60, -2, 2, 60),
+                                                         flags=pymupdf.TEXTFLAGS_DICT | pymupdf.TEXT_IGNORE_ACTUALTEXT)["blocks"]
                   for l in b.get("lines", []) for span in l["spans"]}
     check(0xE5484D in colors, "color runs: the first Arabic word is drawn in the run color")
     final_para = block_containing(step6, "الأرباح")

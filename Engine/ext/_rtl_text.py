@@ -9,11 +9,14 @@ PDFKit reads backwards. This module does the layout itself:
   * a compact Unicode bidi resolver (UAX #9 W1-W7, N1-N2, I1-I2, L1-L2,
     no explicit embeddings) orders mixed Arabic + Latin + digits;
   * HarfBuzz (uharfbuzz) shapes each directional run with the real font;
-  * glyphs are written straight into a content stream with an Identity-H
-    font whose ToUnicode maps every glyph to its LOGICAL characters
-    (initial/medial/final forms -> base letter, lam-alef -> two letters),
-    in logical order, so PyMuPDF get_text and PDFKit search/selection return
-    the logical string.
+  * glyphs are written straight into a content stream, in visual order, with
+    an Identity-H font whose ToUnicode maps every glyph to its LOGICAL
+    characters (initial/medial/final forms -> base letter, lam-alef -> two
+    letters); PDFKit's own bidi pass turns that into the logical string;
+  * lines MuPDF, poppler or Acrobat would scramble (digits, Latin words,
+    punctuation, ligatures next to Arabic) also carry their logical text as
+    /ActualText, so copy and extraction give the logical string there too
+    (see GlyphWriter; redaction drops it first, see strip_actual_text).
 
 Files starting with "_" are skipped by the extension loader; pdf_engine.py
 and ext/ocr_layer.py import this module directly.
@@ -199,7 +202,9 @@ def logical_text_from_chars(chars: list[dict[str, Any]], base_rtl: bool | None =
 
 def _visual_string(chars: list[dict[str, Any]]) -> str:
     """Characters in left-to-right visual order. Zero-width glyphs (Arabic
-    marks, ligature tail markers) attach to the glyph they sit on: before it
+    marks, the ligature tail markers earlier builds wrote; ligatures now come
+    as multi-character glyphs, see prepare_glyph_chars) attach to the glyph
+    they sit on: before it
     when that glyph is RTL (so the run reversal puts them after it), after it
     otherwise. Multi-character glyphs (lam-alef) are flipped to visual order."""
     def x0(ch: dict[str, Any]) -> float:
@@ -844,6 +849,92 @@ def _font_repair(doc: Any, xref: int, basefont: str) -> Any:
 # PyMuPDF text-dict post-processing (used by the engine's block extraction)
 # --------------------------------------------------------------------------
 
+def glyph_flags(kind: str) -> int:
+    """PyMuPDF text flags for GEOMETRY-sensitive reads ("rawdict", "dict",
+    "search"): the defaults plus TEXT_IGNORE_ACTUALTEXT. Lines written by
+    GlyphWriter carry their logical text as /ActualText on one zero-width
+    glyph, so with ActualText applied every character of such a line sits on
+    that one point; the engine wants the real glyph boxes instead."""
+    import fitz
+
+    base = {"rawdict": fitz.TEXTFLAGS_RAWDICT, "dict": fitz.TEXTFLAGS_DICT, "search": fitz.TEXTFLAGS_SEARCH}[kind]
+    return base | fitz.TEXT_IGNORE_ACTUALTEXT
+
+
+def prepare_glyph_chars(page: Any, data: dict[str, Any]) -> None:
+    """Normalise a rawdict read with glyph_flags("rawdict") in place:
+
+      * a glyph whose ToUnicode holds several characters (a ligature) comes
+        back from MuPDF as the first character on the glyph plus zero-width
+        characters at its right edge; put the whole logical text back on the
+        glyph (logical_text_from_chars flips multi-character RTL glyphs);
+      * GlyphWriter's ActualText carriers (lone narrow spaces) and other
+        zero-width spaces are dropped.
+    The trailing characters are found through get_texttrace(), which reports
+    them in stream order with glyph id -1 right after their glyph."""
+    ligatures: dict[tuple[float, float, str], str] = {}
+    try:
+        trace = page.get_texttrace()
+    except Exception:
+        trace = []
+    carriers: set[tuple[float, float]] = set()
+    for span in trace:
+        chars = span.get("chars") or ()
+        if len(chars) == 1 and chars[0][0] == 32 and chars[0][1] > 255:
+            # GlyphWriter's ActualText carrier: a lone, very narrow space
+            # drawn with the font's last (otherwise unused) glyph id.
+            box = chars[0][3]
+            if box[2] - box[0] < 0.12 * float(span.get("size") or 0):
+                carriers.add((round(chars[0][2][0], 1), round(chars[0][2][1], 1)))
+        k = 0
+        while k < len(chars):
+            unicode, gid, origin = chars[k][0], chars[k][1], chars[k][2]
+            j = k + 1
+            while j < len(chars) and chars[j][1] == -1:
+                j += 1
+            if gid >= 0 and j > k + 1:
+                text = "".join(chr(c[0]) for c in chars[k:j])
+                ligatures[(round(origin[0], 1), round(origin[1], 1), chr(unicode))] = text
+            k = j
+    for block in data.get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                chars = span.get("chars")
+                if not chars:
+                    continue
+                drop: set[int] = set()
+                for i, ch in enumerate(chars):
+                    box = ch.get("bbox") or (0, 0, 0, 0)
+                    origin = ch.get("origin") or (box[0], box[3])
+                    if ch.get("c") == " " and (round(origin[0], 1), round(origin[1], 1)) in carriers:
+                        drop.add(i)
+                        continue
+                    if box[2] - box[0] < 0.01:
+                        if ch.get("c") == " ":
+                            drop.add(i)
+                        continue
+                    text = ligatures.get((round(origin[0], 1), round(origin[1], 1), ch.get("c", "")))
+                    if not text:
+                        continue
+                    # Remove the trailing characters MuPDF placed at the
+                    # glyph's right edge (in either order: MuPDF may have
+                    # reversed the run they belong to).
+                    wanted = list(text[1:])
+                    found: list[int] = []
+                    for j, other in enumerate(chars):
+                        if j in drop or j == i or not wanted:
+                            continue
+                        obox = other.get("bbox") or (0, 0, 0, 0)
+                        if obox[2] - obox[0] < 0.01 and abs(obox[0] - box[2]) < 0.05 and other.get("c") in wanted:
+                            wanted.remove(other["c"])
+                            found.append(j)
+                    if not wanted:
+                        ch["c"] = text
+                        drop.update(found)
+                if drop:
+                    span["chars"] = [ch for i, ch in enumerate(chars) if i not in drop]
+
+
 def mark_line_directions(data: dict[str, Any]) -> None:
     """Paragraph direction for each row containing RTL text, stored as
     line["rtl_base"]. A row alone can be ambiguous ("PDF Studio بنسبة نمو"
@@ -968,7 +1059,7 @@ class PlacedGlyph:
     dy: float         # vertical offset (points, up positive)
     cluster: int      # logical index into the paragraph text
     text: str         # the ONE logical character this glyph stands for
-    extra: str = ""   # further characters of a ligature (written as markers)
+    extra: str = ""   # further characters of a ligature (same glyph's ToUnicode)
     width: float = 0.0  # advance in points
     rtl: bool = False
 
@@ -1002,7 +1093,7 @@ def _shape_line(font: ShapingFont, text: str, size: float, base_rtl: bool, offse
         # Logical text per glyph. A cluster's characters are dealt to its
         # glyphs in logical order, one each; when a cluster has fewer glyphs
         # than characters (lam-alef, "fi"), the first glyph keeps the first
-        # character and the rest ride along as zero-width markers.
+        # character and the rest join it in the glyph's ToUnicode.
         clusters = sorted({g[4] for g in glyphs})
         cluster_end = {c: (clusters[k + 1] if k + 1 < len(clusters) else len(chunk)) for k, c in enumerate(clusters)}
         members: dict[int, list[int]] = {}
@@ -1101,24 +1192,147 @@ def _tounicode_cmap(entries: dict[int, str]) -> bytes:
     return "\n".join(lines).encode("ascii")
 
 
+# Advance of the ActualText carrier glyph, in 1/1000 em. It must not be zero:
+# MuPDF drops text lines whose characters all have empty boxes from its
+# dict/rawdict/words output. It must stay well under MuPDF's 0.15 em
+# "logical order" tolerance, or MuPDF flags the line as visual-order RTL and
+# reverses the ActualText characters. Stretched lines (OCR) squeeze the
+# carrier back with Tz.
+CARRIER_WIDTH = 50
+
+
+def _actual_text(text: str) -> str:
+    """PDF text string (UTF-16BE with BOM, hex) for an /ActualText entry."""
+    return "<FEFF" + text.encode("utf-16-be").hex().upper() + ">"
+
+
+# A GlyphWriter span, also after MuPDF rewrote the content stream (it drops
+# whitespace and may turn the hex string into a literal one).
+_OUR_SPAN = re.compile(rb"/Span\s*<<\s*/ActualText\s*(?:<[0-9A-Fa-f\s]*>|\((?:\\.|[^\\)])*\))\s*/PSRtl\s+true"
+                       rb"\s*/PSBox\s*\[([-0-9.\s]*)\]\s*>>\s*BDC", re.S)
+
+
+def strip_actual_text(page: Any, areas: list[tuple[float, float, float, float]] | None = None) -> int:
+    """Turn GlyphWriter ActualText spans into plain marked-content sequences
+    (BMC, same EMC), so those lines' text reverts to their glyphs. `areas`
+    (PDF user space rects) limits this to lines whose /PSBox touches one;
+    None means every line. Redaction removes glyphs but never marked-content
+    properties, so a line's ActualText would keep the removed words.
+    Returns the number of spans changed."""
+    doc = page.parent
+
+    def hit(match: "re.Match[bytes]") -> bytes:
+        if areas is None:
+            return b"/PSRtl BMC"
+        try:
+            x0, y0, x1, y1 = (float(v) for v in match.group(1).split())
+        except ValueError:
+            return b"/PSRtl BMC"
+        for ax0, ay0, ax1, ay1 in areas:
+            if min(x1, ax1) >= max(x0, ax0) and min(y1, ay1) >= max(y0, ay0):
+                return b"/PSRtl BMC"
+        return match.group(0)
+
+    changed = 0
+    for xref in page.get_contents():
+        data = doc.xref_stream(xref) or b""
+        if b"/PSRtl" not in data:
+            continue
+        new = _OUR_SPAN.sub(hit, data)
+        if new != data:
+            doc.update_stream(xref, new)
+            changed += 1
+    return changed
+
+
+def redaction_areas(page: Any) -> list[tuple[float, float, float, float]]:
+    """/Rect of every redaction annotation on the page, PDF user space."""
+    import fitz
+
+    doc = page.parent
+    areas = []
+    for annot in page.annots(types=[fitz.PDF_ANNOT_REDACT]) or []:
+        kind, value = doc.xref_get_key(annot.xref, "Rect")
+        try:
+            x0, y0, x1, y1 = (float(v) for v in value.strip("[] ").split())
+        except ValueError:
+            continue
+        areas.append((min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)))
+    return areas
+
+
+def install_redaction_guard() -> None:
+    """Make fitz.Page.apply_redactions first drop the ActualText of every
+    GlyphWriter line a redaction touches (see strip_actual_text). Idempotent."""
+    import fitz
+
+    current = fitz.Page.apply_redactions
+    if getattr(current, "_pdfstudio_guard", False):
+        return
+
+    def apply_redactions(self: Any, *args: Any, **kwargs: Any) -> Any:
+        strip_actual_text(self, redaction_areas(self))
+        return current(self, *args, **kwargs)
+
+    apply_redactions._pdfstudio_guard = True  # type: ignore[attr-defined]
+    fitz.Page.apply_redactions = apply_redactions
+
+
+def _mupdf_reads_natively(text: str) -> bool:
+    """True when MuPDF's own visual-order handling already extracts this
+    line logically: RTL letters, marks and single spaces only (MuPDF reverses
+    such runs as a whole). Digits, Latin words, punctuation and ligature
+    glyphs need the line's /ActualText instead."""
+    if not text or text != text.strip() or "  " in text:
+        return False
+    for ch in text:
+        if ch == " ":
+            continue
+        if unicodedata.bidirectional(ch) not in ("R", "AL", "NSM"):
+            return False
+    return True
+
+
 class GlyphWriter:
     """Collects positioned glyphs for one page and writes them as a single
     content stream with one embedded subset font per ShapingFont.
 
-    Glyphs go out in VISUAL order (left to right), one TJ per line, the way
-    word processors write RTL text: PDFKit and MuPDF both run the bidi
-    algorithm on that sequence and recover the logical string. Each glyph's
-    ToUnicode entry is the single character it was shaped from; ligatures
-    get zero-width marker glyphs for their further characters, so no reader
-    ever has to reorder characters inside one glyph."""
+    Text extraction has to satisfy two families of readers:
+
+      * PDFKit (the app, Preview) ignores /ActualText and runs its own bidi
+        pass over the glyphs in CONTENT-STREAM order. Glyphs therefore go out
+        in VISUAL order (left to right, one TJ per line), exactly the way
+        CoreText writes RTL text: a stream order that differs from the glyph
+        positions makes PDFKit reorder wrongly and can crash its selection
+        code. Each glyph's ToUnicode is the logical text it was shaped from;
+        a ligature maps to all of its characters in logical order (lam-alef
+        -> lam + alef), which PDFKit keeps as a unit. (Zero-width "marker"
+        glyphs for ligature tails, used before, made PDFKit attach the tails
+        to the neighbouring line, so copied text picked up stray letters.)
+      * MuPDF/PyMuPDF, poppler and Acrobat honour /ActualText. MuPDF never
+        moves digits or Latin words relative to Arabic runs and reverses the
+        characters of ligatures, so a visual stream comes out scrambled.
+        Every such line carries its LOGICAL text instead:
+            /Span <</ActualText ()          /PSRtl true /PSBox [..]>> BDC glyphs EMC
+            /Span <</ActualText <line text> /PSRtl true /PSBox [..]>> BDC <carrier> Tj EMC
+        The empty span hides the glyphs from those readers; the line's text
+        rides on one extra glyph, an empty, nearly zero-advance "carrier" at
+        the line's start edge (right end for RTL) whose ToUnicode is a space
+        (PDFKit trims it). MuPDF assigns ActualText characters to the glyphs
+        of the span one by one and stacks the rest after the last one; with
+        a tiny carrier advance its bidi heuristics leave them in logical
+        order (see CARRIER_WIDTH). Character boxes of such a line
+        all sit on the carrier, so geometry-sensitive engine reads use
+        glyph_flags(); redaction first drops the ActualText of the lines it
+        touches (strip_actual_text) so no removed word survives in it."""
 
     def __init__(self, page: Any):
         self.page = page
         self.doc = page.parent
         self.to_pdf = engine_to_pdf_matrix(page)
-        # (font, header, matrix, items) per line; items are tuples:
-        #   ("g", gid, x, dy, rgb) real glyph, ("m", char, x, dy, rgb) marker
-        self.lines: list[tuple[ShapingFont, int, float, Any, list[tuple]]] = []
+        # (font, render mode, size, matrix, items, actual text, rtl, PDF box)
+        # per line; items are (gid, x, dy, rgb) in visual order.
+        self.lines: list[tuple] = []
         self.fonts: dict[int, ShapingFont] = {}
         self.maps: dict[int, dict[int, str]] = {}
 
@@ -1142,13 +1356,18 @@ class GlyphWriter:
         mapping = self.maps.setdefault(key, {})
         known = None
         items: list[tuple] = []
+        ligatures = False
         for glyph in line.glyphs:
             if glyph.gid == 0:
                 continue
             rgb = color
             if colors is not None and 0 <= glyph.cluster < len(colors) and colors[glyph.cluster] is not None:
                 rgb = colors[glyph.cluster]
-            if glyph.text:
+            if glyph.extra:
+                # Ligature: every character, logical order, on the one glyph.
+                mapping[glyph.gid] = glyph.text + glyph.extra
+                ligatures = True
+            elif glyph.text:
                 current = mapping.get(glyph.gid)
                 if current is None or (unicodedata.mirrored(glyph.text) and glyph.rtl):
                     mapping[glyph.gid] = glyph.text
@@ -1157,38 +1376,20 @@ class GlyphWriter:
                 guess = known.get(glyph.gid)
                 if guess and len(guess) == 1:
                     mapping[glyph.gid] = guess
-            markers = [("m", ch, 0.0, glyph.dy, rgb) for ch in glyph.extra]
-            if glyph.rtl and markers:
-                items.extend((kind, ch, glyph.x, dy, c) for kind, ch, _x, dy, c in reversed(markers))
-                items.append(("g", glyph.gid, glyph.x, glyph.dy, rgb))
-            else:
-                items.append(("g", glyph.gid, glyph.x, glyph.dy, rgb))
-                items.extend((kind, ch, glyph.x + glyph.width, dy, c) for kind, ch, _x, dy, c in markers)
-        if items:
-            self.lines.append((font, render_mode, size, matrix, items))
-
-    def _marker_gids(self, key: int) -> dict[str, int]:
-        """Unused glyph ids (empty in the subset, zero advance) standing for
-        ligature tail characters."""
-        font = self.fonts[key]
-        mapping = self.maps[key]
-        wanted: list[str] = []
-        for line_font, _mode, _size, _matrix, items in self.lines:
-            if id(line_font) != key:
-                continue
-            for item in items:
-                if item[0] == "m" and item[1] not in wanted:
-                    wanted.append(item[1])
-        gids: dict[str, int] = {}
-        candidate = len(font.tt.getGlyphOrder()) - 1
-        for ch in wanted:
-            while candidate > 0 and candidate in mapping:
-                candidate -= 1
-            if candidate <= 0:
-                break
-            gids[ch] = candidate
-            candidate -= 1
-        return gids
+            items.append((glyph.gid, glyph.x, glyph.dy, rgb))
+        if not items:
+            return
+        actual = None
+        if has_rtl(line.text) and (ligatures or not _mupdf_reads_natively(line.text)):
+            # Edge spaces would match the carrier's own " " in MuPDF's
+            # prefix/postfix matching of ActualText against glyph text.
+            actual = line.text.strip() or None
+        # The line's box in PDF user space (redaction matches against it).
+        width = max((x + font.advance(gid) * size for gid, x, _dy, _rgb in items), default=0.0)
+        corners = [fitz.Point(px, py) * matrix for px in (0.0, width)
+                   for py in (-font.ascender * size, -font.descender * size)]
+        box = (min(p.x for p in corners), min(p.y for p in corners), max(p.x for p in corners), max(p.y for p in corners))
+        self.lines.append((font, render_mode, size, matrix, items, actual, line.rtl, box, hscale))
 
     def commit(self) -> int:
         """Embed fonts, write the content stream; returns lines written."""
@@ -1196,26 +1397,35 @@ class GlyphWriter:
             return 0
         page, doc = self.page, self.doc
         names: dict[int, str] = {}
-        markers: dict[int, dict[str, int]] = {}
+        carriers: dict[int, int] = {}
         for key, font in self.fonts.items():
             mapping = self.maps.get(key) or {}
             real = sorted(mapping) or [0]
-            markers[key] = self._marker_gids(key)
-            unicode_map = dict(mapping)
-            for ch, gid in markers[key].items():
-                unicode_map[gid] = ch
-            digest = hashlib.sha1((font.label + ",".join(map(str, sorted(unicode_map)))).encode()).hexdigest()[:8]
+            used = {item[0] for line in self.lines if id(line[0]) == key for item in line[4]}
+            carriers[key] = self._carrier_gid(font, set(mapping) | used)
+            digest = hashlib.sha1((font.label + ",".join(map(str, real))).encode()).hexdigest()[:8]
             name = f"PSR{digest}"
             subset = font.subset_buffer(real)
             xref = page.insert_font(fontname=name, fontbuffer=subset)
-            self._replace_tounicode(xref, unicode_map)
+            # The carrier reads as a space for readers that ignore ActualText
+            # (PDFKit trims it; an unmapped glyph breaks PDFKit's selection).
+            self._replace_tounicode(xref, {**mapping, carriers[key]: " "} if carriers[key] else mapping)
             self._rename(xref, font, digest)
+            if carriers[key]:
+                self._set_width(xref, carriers[key], CARRIER_WIDTH)
             names[key] = name
         if not page.is_wrapped:
             page.wrap_contents()
         chunks = ["q", "BT"]
-        for font, mode, size, m, items in self.lines:
+        for font, mode, size, m, items, actual, rtl, box, hscale in self.lines:
+            # Horizontal scaling (Tz) for the carrier so that a stretched line
+            # (OCR) does not stretch it past MuPDF's tolerance either.
+            squeeze = 1.0 / max(1.0, hscale)
+            props = "/PSRtl true /PSBox [%.2f %.2f %.2f %.2f]" % box
             key = id(font)
+            carrier = carriers[key]
+            if not carrier:
+                actual = None
             chunks.append(f"{mode} Tr")
             chunks.append(f"/{names[key]} {size:.3f} Tf")
             chunks.append("%.5f %.5f %.5f %.5f %.3f %.3f Tm" % (m.a, m.b, m.c, m.d, m.e, m.f))
@@ -1229,15 +1439,21 @@ class GlyphWriter:
                     chunks.append("[" + "".join(tj) + "] TJ")
                     tj.clear()
 
-            for kind, ident, x, dy, rgb in items:
-                if kind == "m":
-                    gid = markers[key].get(ident)
-                    if gid is None:
-                        continue
-                    advance = 0.0  # empty glyph, /DW 0 (see _rename)
-                else:
-                    gid = ident
-                    advance = font.advance(gid) * size
+            def carry(back: bool) -> None:
+                # The logical text on the empty carrier glyph just inside the
+                # line's start edge (its right end for RTL lines: the carrier
+                # then ends exactly there, so a clip of the line keeps it).
+                flush()
+                glyph = f"[{CARRIER_WIDTH} <{carrier:04X}>] TJ" if back else f"<{carrier:04X}> Tj"
+                tz = (f"{100 * squeeze:.4f} Tz ", " 100 Tz") if squeeze < 1.0 else ("", "")
+                chunks.append(f"/Span <</ActualText {_actual_text(actual)} {props}>> BDC {tz[0]}{glyph}{tz[1]} EMC")
+
+            if actual is not None and not rtl:
+                carry(False)
+                pen = CARRIER_WIDTH * size * squeeze / 1000.0
+            if actual is not None:
+                chunks.append(f"/Span <</ActualText () {props}>> BDC")
+            for gid, x, dy, rgb in items:
                 if rgb != current:
                     flush()
                     chunks.append("%.4f %.4f %.4f rg" % tuple(rgb))
@@ -1250,8 +1466,15 @@ class GlyphWriter:
                 if abs(shift) > 0.05:
                     tj.append("%.2f" % shift)
                 tj.append("<%04X>" % gid)
-                pen = x + advance
+                pen = x + font.advance(gid) * size
             flush()
+            if actual is not None:
+                chunks.append("EMC")
+                if rise:
+                    chunks.append("0 Ts")
+                    rise = 0.0
+                if rtl:
+                    carry(True)
             if rise:
                 chunks.append("0 Ts")
         chunks += ["0 Tr", "ET", "Q"]
@@ -1263,6 +1486,35 @@ class GlyphWriter:
         refs = " ".join(f"{x} 0 R" for x in [*contents, xref])
         doc.xref_set_key(page.xref, "Contents", f"[{refs}]")
         return len(self.lines)
+
+    @staticmethod
+    def _carrier_gid(font: ShapingFont, taken: set[int]) -> int:
+        """An unused glyph id (empty in the subset) for the ActualText
+        carrier."""
+        candidate = len(font.tt.getGlyphOrder()) - 1
+        while candidate > 0 and candidate in taken:
+            candidate -= 1
+        return max(candidate, 0)
+
+    def _set_width(self, font_xref: int, gid: int, width: int) -> None:
+        """Add one glyph width to the descendant font's /W array."""
+        doc = self.doc
+        _kind, value = doc.xref_get_key(font_xref, "DescendantFonts")
+        match = re.search(r"(\d+) 0 R", value or "")
+        if not match:
+            return
+        descendant = int(match.group(1))
+        kind, value = doc.xref_get_key(descendant, "W")
+        entry = f" {gid} [{width}]]"
+        if kind == "xref":
+            wxref = int(value.split()[0])
+            body = doc.xref_object(wxref, compressed=True).strip()
+            if body.endswith("]"):
+                doc.update_object(wxref, body[:-1] + entry)
+        elif kind == "array" and value.strip().endswith("]"):
+            doc.xref_set_key(descendant, "W", value.strip()[:-1] + entry)
+        else:
+            doc.xref_set_key(descendant, "W", "[" + entry)
 
     def _rename(self, xref: int, font: ShapingFont, digest: str) -> None:
         # MuPDF names the font after whatever name record it finds first
@@ -1278,8 +1530,8 @@ class GlyphWriter:
             return
         descendant = int(match.group(1))
         doc.xref_set_key(descendant, "BaseFont", base)
-        # Glyphs missing from /W (ligature markers) must not advance: the
-        # PDF default width is 1000 units.
+        # Glyphs missing from /W must not advance: the PDF default width is
+        # 1000 units.
         doc.xref_set_key(descendant, "DW", "0")
         fd_kind, fd_value = doc.xref_get_key(descendant, "FontDescriptor")
         if fd_kind == "xref":
