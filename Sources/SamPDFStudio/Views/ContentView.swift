@@ -229,24 +229,36 @@ private struct ToolStripView: View {
     @ViewBuilder
     private var hintPill: some View {
         if !hint.isEmpty {
-            HStack(spacing: 5) {
-                Image(systemName: "lightbulb")
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(Theme.warning)
-                Text(hint)
-                    .font(Theme.Font.caption)
-                    .foregroundStyle(Theme.textSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+            // Full sentence when there's room; just the bulb (with the hint
+            // as a tooltip) when the tools need the width.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 5) {
+                    bulb
+                    Text(hint)
+                        .font(Theme.Font.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Theme.surfaceRaised.opacity(0.7)))
+                bulb
+                    .padding(6)
+                    .background(Circle().fill(Theme.surfaceRaised.opacity(0.7)))
             }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 4)
-            .background(Capsule().fill(Theme.surfaceRaised.opacity(0.7)))
-            .frame(minWidth: 40, maxWidth: 340, alignment: .trailing)
+            .frame(maxWidth: 420, alignment: .trailing)
             .layoutPriority(-1)
             .help(hint)
         }
     }
+
+    private var bulb: some View {
+        Image(systemName: "lightbulb")
+            .font(.system(size: 10.5, weight: .semibold))
+            .foregroundStyle(Theme.warning)
+    }
+
 
     private static let markupSwatches: [(name: String, hex: String)] = [
         ("Yellow", "#f7d648"), ("Green", "#7ed957"), ("Blue", "#6db5f2"),

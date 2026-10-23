@@ -6,7 +6,10 @@ struct SamPDFStudioApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup("PDF Studio") {
+        // Single-window app: one shared document store. A WindowGroup would
+        // spawn an extra window per Finder "Open" event, all showing the same
+        // document state.
+        Window("PDF Studio", id: "main") {
             ContentView()
                 .environmentObject(appDelegate.store)
                 .frame(minWidth: 1040, minHeight: 680)
