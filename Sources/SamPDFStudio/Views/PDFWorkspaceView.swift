@@ -77,6 +77,17 @@ struct PDFWorkspaceView: View {
                         onPlaceImage: { page, x, y in
                             store.placeImage(page: page, x: x, y: y)
                         },
+                        imagePlacements: store.canvasImages,
+                        selectedImageID: store.selectedImageID,
+                        hasPendingImage: store.pendingImageURL != nil,
+                        onSelectImage: { store.selectCanvasImage($0) },
+                        onTransformImage: { placement, rect in
+                            store.transformCanvasImage(placement, to: rect)
+                        },
+                        onDeleteImage: { store.deleteCanvasImage($0) },
+                        onFormFieldRegion: { pageIndex, rect in
+                            store.createFieldFromCanvas(pageIndex: pageIndex, engineRect: rect)
+                        },
                         onPlaceTextDraft: { page, x, y in
                             store.placeTextDraft(page: page, x: x, y: y)
                         },

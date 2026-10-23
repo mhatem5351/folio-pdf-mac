@@ -41,6 +41,13 @@ struct PDFPreviewView: NSViewRepresentable {
     let onAddTextBox: (Int, CGPoint, String) -> Void
     let onPlaceSignature: (Int, Double, Double) -> Void
     let onPlaceImage: (Int, Double, Double) -> Void
+    var imagePlacements: [EngineImagePlacement] = []
+    var selectedImageID: String?
+    var hasPendingImage = false
+    var onSelectImage: (EngineImagePlacement?) -> Void = { _ in }
+    var onTransformImage: (EngineImagePlacement, CGRect) -> Void = { _, _ in }
+    var onDeleteImage: (EngineImagePlacement) -> Void = { _ in }
+    var onFormFieldRegion: (Int, CGRect) -> Void = { _, _ in }
     let onPlaceTextDraft: (Int, Double, Double) -> Void
     let onLinkRegion: (Int, CGRect) -> Void
     let onFillSignClick: (Int, Double, Double) -> Void
@@ -773,6 +780,13 @@ struct PDFPreviewView: NSViewRepresentable {
         var onAddTextBox: ((Int, CGPoint, String) -> Void)?
         var onPlaceSignature: ((Int, Double, Double) -> Void)?
         var onPlaceImage: ((Int, Double, Double) -> Void)?
+        /// Edit ▸ Image: select/move/resize existing image placements.
+        lazy var imageEditor = CanvasImageEditor(pdfView: self)
+        var hasPendingImage = false
+        var onDeleteImage: ((EngineImagePlacement) -> Void)?
+        var onSelectImage: ((EngineImagePlacement?) -> Void)?
+        /// Edit ▸ Field: a dragged rect (engine coords) for a new form field.
+        var onFormFieldRegion: ((Int, CGRect) -> Void)?
         /// Annotate/Fill&Sign "Text": place a new-text draft (the editor that
         /// reliably accepts typing) rather than a bare inline field.
         var onPlaceTextDraft: ((Int, Double, Double) -> Void)?
@@ -864,6 +878,14 @@ struct PDFPreviewView: NSViewRepresentable {
             }
         }
 
+        /// Chrome above the canvas (tool strip) can change height and shift
+        /// the page under overlays without any scroll notification.
+        override func setFrameSize(_ newSize: NSSize) {
+            super.setFrameSize(newSize)
+            repositionBlockEditor()
+            imageEditor.reposition()
+        }
+
         /// Keep the block editor glued to its text through scroll and zoom.
         func startTrackingScroll() {
             guard scrollObservers.isEmpty else { return }
@@ -888,6 +910,7 @@ struct PDFPreviewView: NSViewRepresentable {
                         guard (note.object as? PDFView) === self else { return }
                     }
                     self.repositionBlockEditor()
+                    self.imageEditor.reposition()
                 }
                 scrollObservers.append(observer)
             }
@@ -957,6 +980,7 @@ struct PDFPreviewView: NSViewRepresentable {
         private enum LassoPurpose {
             case grab
             case link
+            case formField
         }
 
         private enum GrabState {
@@ -1016,9 +1040,15 @@ struct PDFPreviewView: NSViewRepresentable {
                     beginGrab(at: viewPoint, purpose: .link)
                     return
                 case .image:
-                    placeAtClick(viewPoint) { [weak self] page, x, y in
-                        self?.onPlaceImage?(page, x, y)
+                    if imageEditor.mouseDown(at: viewPoint) { return }
+                    if hasPendingImage {
+                        placeAtClick(viewPoint) { [weak self] page, x, y in
+                            self?.onPlaceImage?(page, x, y)
+                        }
                     }
+                    return
+                case .formField:
+                    beginGrab(at: viewPoint, purpose: .formField)
                     return
                 case .redact:
                     break // plain text selection via PDFKit
@@ -1108,10 +1138,11 @@ struct PDFPreviewView: NSViewRepresentable {
                         }
                     }
                     return
-                case .grab, .link:
+                case .grab, .link, .formField:
                     continueGrab(to: viewPoint)
                     return
                 case .image:
+                    imageEditor.mouseDragged(to: viewPoint, shift: event.modifierFlags.contains(.shift))
                     return
                 case .redact:
                     break
@@ -1141,10 +1172,11 @@ struct PDFPreviewView: NSViewRepresentable {
                         if moved { onAnnotationEdited?("Move Annotation") }
                     }
                     return
-                case .grab, .link:
+                case .grab, .link, .formField:
                     finishGrab(at: viewPoint)
                     return
                 case .image:
+                    imageEditor.mouseUp()
                     return
                 case .redact:
                     break
@@ -1211,6 +1243,18 @@ struct PDFPreviewView: NSViewRepresentable {
                 onAnnotationEdited?("Delete Annotation")
                 return
             }
+            // Delete removes the selected image placement (Edit ▸ Image).
+            if isEditingEnabled, editTool == .image,
+               event.keyCode == 51 || event.keyCode == 117,
+               let placement = imageEditor.selected {
+                onDeleteImage?(placement)
+                return
+            }
+            if isEditingEnabled, editTool == .image, event.keyCode == 53, imageEditor.selected != nil {
+                imageEditor.clear()
+                onSelectImage?(nil)
+                return
+            }
             // Escape clears an annotation selection.
             if isEditingEnabled, editTool == .contentText,
                event.keyCode == 53, selectedAnnotation != nil {
@@ -1256,6 +1300,8 @@ struct PDFPreviewView: NSViewRepresentable {
                 }
             case .contentText:
                 addCursorRect(bounds, cursor: .iBeam)
+            case .formField:
+                addCursorRect(bounds, cursor: .crosshair)
             case .image, .redact:
                 break
             }
@@ -1973,6 +2019,9 @@ struct PDFPreviewView: NSViewRepresentable {
                 case .link:
                     clearRegionOverlay()
                     onLinkRegion?(pageIndex, pdfKitRect)
+                case .formField:
+                    clearRegionOverlay()
+                    onFormFieldRegion?(pageIndex, engineRect(fromPDFKitRect: pdfKitRect, page: page))
                 }
 
             case .move(let page, let originalRect, let offset):
@@ -2207,6 +2256,22 @@ struct PDFPreviewView: NSViewRepresentable {
         view.onAddTextBox = onAddTextBox
         view.onPlaceSignature = onPlaceSignature
         view.onPlaceImage = onPlaceImage
+        view.hasPendingImage = hasPendingImage
+        view.onDeleteImage = onDeleteImage
+        view.onSelectImage = onSelectImage
+        view.onFormFieldRegion = onFormFieldRegion
+        if isEditing && editTool == .image {
+            if view.imageEditor.placements != imagePlacements {
+                view.imageEditor.placements = imagePlacements
+            }
+            if view.imageEditor.selectedID != selectedImageID {
+                view.imageEditor.select(id: selectedImageID)
+            }
+            view.imageEditor.onSelect = onSelectImage
+            view.imageEditor.onTransform = onTransformImage
+        } else if view.imageEditor.selectedID != nil {
+            view.imageEditor.clear()
+        }
         view.onPlaceTextDraft = onPlaceTextDraft
         view.onLinkRegion = onLinkRegion
         view.onFillSignClick = onFillSignClick

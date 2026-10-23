@@ -190,6 +190,24 @@ private struct ToolStripView: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    tools
+                }
+                .buttonStyle(ToolChipStyle())
+                .padding(.vertical, 1)
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            hintPill
+        }
+        .controlSize(.small)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(Theme.chrome)
+    }
+
+    @ViewBuilder
+    private var tools: some View {
             switch store.selectedOperation {
             case .read:
                 EmptyView()
@@ -206,26 +224,28 @@ private struct ToolStripView: View {
             case .scanOCR:
                 ocrTools
             }
-            Spacer()
-            if !hint.isEmpty {
-                HStack(spacing: 5) {
-                    Image(systemName: "lightbulb")
-                        .font(.system(size: 10.5, weight: .semibold))
-                        .foregroundStyle(Theme.warning)
-                    Text(hint)
-                        .font(Theme.Font.caption)
-                        .foregroundStyle(Theme.textSecondary)
-                        .lineLimit(1)
-                }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(Theme.surfaceRaised.opacity(0.7)))
+    }
+
+    @ViewBuilder
+    private var hintPill: some View {
+        if !hint.isEmpty {
+            HStack(spacing: 5) {
+                Image(systemName: "lightbulb")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Theme.warning)
+                Text(hint)
+                    .font(Theme.Font.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(Theme.surfaceRaised.opacity(0.7)))
+            .frame(minWidth: 40, maxWidth: 340, alignment: .trailing)
+            .layoutPriority(-1)
+            .help(hint)
         }
-        .controlSize(.small)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 7)
-        .background(Theme.chrome)
     }
 
     private static let markupSwatches: [(name: String, hex: String)] = [
@@ -352,11 +372,60 @@ private struct ToolStripView: View {
             .disabled(!store.hasCopiedRegion || store.busy)
 
         case .image:
-            Button {
-                store.chooseImageForInsert()
-            } label: {
-                Label(store.pendingImageURL?.lastPathComponent ?? "Choose Image…", systemImage: "photo.badge.plus")
+            if let image = store.selectedCanvasImage {
+                Text("\(Int(image.engineRect.width.rounded())) × \(Int(image.engineRect.height.rounded())) pt · \(image.width)×\(image.height) px")
+                    .font(Theme.Font.caption.monospacedDigit())
+                    .foregroundStyle(Theme.textSecondary)
+                Button { store.replaceSelectedImage() } label: {
+                    Label("Replace…", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .buttonStyle(ToolChipStyle())
+                Button { store.rotateSelectedImage(by: 90) } label: {
+                    Label("Rotate", systemImage: "rotate.right")
+                }
+                .buttonStyle(ToolChipStyle())
+                Button { store.extractSelectedImage() } label: {
+                    Label("Extract…", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(ToolChipStyle())
+                Button(role: .destructive) { store.deleteCanvasImage(image) } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                .buttonStyle(ToolChipStyle())
+                .foregroundStyle(Theme.danger)
+            } else {
+                Button {
+                    store.chooseImageForInsert()
+                } label: {
+                    Label(store.pendingImageURL?.lastPathComponent ?? "Insert Image…", systemImage: "photo.badge.plus")
+                }
+                .buttonStyle(ToolChipStyle(isActive: store.pendingImageURL != nil))
+                if store.pendingImageURL != nil {
+                    Button { store.pendingImageURL = nil } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.textTertiary)
+                        .help("Stop placing this image")
+                }
             }
+            Button { store.launch(.images) } label: {
+                Label("All Images…", systemImage: "photo.stack")
+            }
+            .buttonStyle(ToolChipStyle())
+            .disabled(store.busy)
+
+        case .formField:
+            Picker("", selection: $store.newFieldType) {
+                ForEach(AppStore.canvasFieldTypes, id: \.id) { type in
+                    Label(type.title, systemImage: type.symbol).tag(type.id)
+                }
+            }
+            .labelsHidden()
+            .fixedSize()
+            .help("Type of field a drag creates")
+            Button { store.launch(.forms) } label: {
+                Label("Manage Fields…", systemImage: "list.bullet.rectangle")
+            }
+            .buttonStyle(ToolChipStyle())
             .disabled(store.busy)
 
         case .redact:

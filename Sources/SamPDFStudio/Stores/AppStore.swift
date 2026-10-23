@@ -159,8 +159,15 @@ final class AppStore: ObservableObject {
         didSet {
             clearCanvasSelection()
             prefetchBlocksForVisiblePage()
+            if selectedEditTool == .image { refreshCanvasImages() } else { selectedImageID = nil }
         }
     }
+    /// Edit ▸ Image: every image placement in the document (engine coords).
+    @Published var canvasImages: [EngineImagePlacement] = []
+    /// Edit ▸ Image: the placement selected on the canvas.
+    @Published var selectedImageID: String?
+    /// Edit ▸ Field: the type a canvas drag creates.
+    @Published var newFieldType: String = "text"
     @Published var selectedFillSignTool: FillSignTool = .text {
         didSet { clearCanvasSelection() }
     }
@@ -172,7 +179,11 @@ final class AppStore: ObservableObject {
     @Published var pageCount: Int = 0
     /// Bumped on every document mutation so views re-render even when the
     /// PDFDocument instance is mutated in place (reorder, rotate, annotate).
-    @Published var documentRevision: Int = 0
+    @Published var documentRevision: Int = 0 {
+        didSet {
+            if selectedOperation == .edit, selectedEditTool == .image { refreshCanvasImages() }
+        }
+    }
     @Published var isDirty: Bool = false
     @Published var canUndo: Bool = false
     @Published var canRedo: Bool = false
@@ -203,7 +214,7 @@ final class AppStore: ObservableObject {
                 findText = selected
             case .redact:
                 redactFindText = selected
-            case .grab, .image, .link:
+            case .grab, .image, .formField, .link:
                 break
             }
         }

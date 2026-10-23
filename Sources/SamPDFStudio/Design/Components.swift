@@ -78,6 +78,8 @@ struct ToolChipStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
+            .lineLimit(1)
+            .fixedSize()
             .font(Theme.Font.callout.weight(.medium))
             .foregroundStyle(isActive ? Theme.accent : Theme.textPrimary)
             .padding(.horizontal, 10)

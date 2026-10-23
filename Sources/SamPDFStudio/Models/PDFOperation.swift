@@ -143,6 +143,7 @@ enum EditTool: String, CaseIterable, Identifiable {
     case contentText
     case grab
     case image
+    case formField
     case link
     case redact
 
@@ -153,6 +154,7 @@ enum EditTool: String, CaseIterable, Identifiable {
         case .contentText: "Text"
         case .grab: "Grab"
         case .image: "Image"
+        case .formField: "Field"
         case .link: "Link"
         case .redact: "Redact"
         }
@@ -163,6 +165,7 @@ enum EditTool: String, CaseIterable, Identifiable {
         case .contentText: "text.cursor"
         case .grab: "lasso"
         case .image: "photo"
+        case .formField: "rectangle.and.pencil.and.ellipsis"
         case .link: "link"
         case .redact: "eye.slash"
         }
@@ -172,7 +175,8 @@ enum EditTool: String, CaseIterable, Identifiable {
         switch self {
         case .contentText: "Click a paragraph to select it · drag anywhere to move · click again to type"
         case .grab: "Drag to lasso a region, then copy, paste, or move it"
-        case .image: "Choose an image, then click the page to place it"
+        case .image: "Click an image to select it · drag to move · drag a handle to resize (Shift stretches)"
+        case .formField: "Drag on the page to draw a form field of the chosen type"
         case .link: "Drag over an area, then enter the link address"
         case .redact: "Select text, then click Redact to remove it permanently"
         }
