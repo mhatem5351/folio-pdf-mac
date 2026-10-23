@@ -1985,21 +1985,50 @@ def cmd_add_symbol(args: argparse.Namespace) -> int:
     return respond(True, output=str(output), kind=args.kind)
 
 
-def cmd_compress(args: argparse.Namespace) -> int:
-    """Reduce file size with Ghostscript. Quality: small (screen 72dpi),
-    medium (ebook 150dpi), high (printer 300dpi)."""
-    settings = {"small": "/screen", "medium": "/ebook", "high": "/printer"}
-    preset = settings.get(args.quality)
-    if preset is None:
-        return respond(False, message=f"quality must be one of {sorted(settings)}")
+# quality → (Ghostscript preset, PyMuPDF image target dpi, JPEG quality)
+_COMPRESS_SETTINGS = {"small": ("/screen", 72, 50), "medium": ("/ebook", 150, 70), "high": ("/printer", 300, 85)}
 
-    gs = shutil.which("gs") or "/opt/homebrew/bin/gs"
-    if not os.path.exists(gs):
-        return respond(False, message="Ghostscript (gs) not found; brew install ghostscript")
+
+def _compress_with_pymupdf(source: str, output: Path, target_dpi: int, quality: int) -> None:
+    """Built-in fallback when Ghostscript isn't installed (release builds):
+    downsample/recompress images, subset fonts, drop unused objects."""
+    import fitz
+
+    doc = fitz.open(source)
+    try:
+        doc.rewrite_images(dpi_threshold=int(target_dpi * 1.3), dpi_target=target_dpi, quality=quality)
+    except Exception:
+        pass  # images PyMuPDF can't recode stay as they are
+    try:
+        doc.subset_fonts()
+    except Exception:
+        pass
+    doc.save(str(output), garbage=4, deflate=True, deflate_images=True, deflate_fonts=True, clean=True, use_objstms=1)
+    doc.close()
+
+
+def cmd_compress(args: argparse.Namespace) -> int:
+    """Reduce file size. Quality: small (72dpi images), medium (150dpi),
+    high (300dpi). Uses Ghostscript when installed, otherwise PyMuPDF."""
+    setting = _COMPRESS_SETTINGS.get(args.quality)
+    if setting is None:
+        return respond(False, message=f"quality must be one of {sorted(_COMPRESS_SETTINGS)}")
+    preset, target_dpi, jpeg_quality = setting
 
     output = Path(args.output)
     ensure_parent(output)
     before = os.path.getsize(args.input)
+    gs = shutil.which("gs") or "/opt/homebrew/bin/gs"
+    if not os.path.exists(gs) or os.environ.get("FOLIO_COMPRESS_ENGINE") == "pymupdf":
+        try:
+            _compress_with_pymupdf(args.input, output, target_dpi, jpeg_quality)
+        except Exception as exc:
+            return respond(False, message=f"Compression failed: {exc}")
+        after = os.path.getsize(output)
+        if after >= before:
+            shutil.copyfile(args.input, output)
+            after = before
+        return respond(True, output=str(output), before_bytes=before, after_bytes=after, method="pymupdf")
     result = subprocess.run(
         [
             gs, "-q", "-dNOPAUSE", "-dBATCH", "-dSAFER",
@@ -2018,7 +2047,7 @@ def cmd_compress(args: argparse.Namespace) -> int:
         # Compression did not help (already optimized) — keep the original.
         shutil.copyfile(args.input, output)
         after = before
-    return respond(True, output=str(output), before_bytes=before, after_bytes=after)
+    return respond(True, output=str(output), before_bytes=before, after_bytes=after, method="ghostscript")
 
 
 def cmd_add_page_numbers(args: argparse.Namespace) -> int:

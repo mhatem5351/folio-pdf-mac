@@ -78,13 +78,25 @@ struct OCRSheet: View {
                 engineCard(
                     .tesseract,
                     title: "Tesseract",
-                    detail: "OCRmyPDF; deskews and rotates pages",
+                    detail: Self.tesseractInstalled
+                        ? "OCRmyPDF; deskews and rotates pages"
+                        : "Optional: brew install ocrmypdf",
                     icon: "text.viewfinder",
                     badge: nil
                 )
+                .disabled(!Self.tesseractInstalled)
+                .opacity(Self.tesseractInstalled ? 1 : 0.55)
             }
         }
     }
+
+    /// The Tesseract engine shells out to `ocrmypdf`, which release builds
+    /// don't bundle; it lights up once installed (e.g. with Homebrew).
+    static let tesseractInstalled: Bool = [
+        PDFEngineClient.enginePythonURL.deletingLastPathComponent().appendingPathComponent("ocrmypdf").path,
+        "/opt/homebrew/bin/ocrmypdf",
+        "/usr/local/bin/ocrmypdf",
+    ].contains { FileManager.default.isExecutableFile(atPath: $0) }
 
     private func engineCard(_ value: Engine, title: String, detail: String, icon: String, badge: String?) -> some View {
         let selected = engine == value

@@ -14,12 +14,13 @@ ROOT = Path(__file__).resolve().parents[1]
 ENGINE = ROOT / "Engine" / "pdf_engine.py"
 
 
-def run_engine(*args: str) -> dict:
+def run_engine(*args: str, env: dict | None = None) -> dict:
     result = subprocess.run(
         [sys.executable, str(ENGINE), *args],
         capture_output=True,
         text=True,
         check=True,
+        env=env,
     )
     return json.loads(result.stdout)
 
@@ -54,6 +55,14 @@ def main() -> int:
         out = tmp_path / "small.pdf"
         payload = run_engine("compress", "--input", str(src), "--output", str(out), "--quality", "small")
         assert payload.get("ok") and payload["after_bytes"] <= payload["before_bytes"], f"compress failed: {payload}"
+        # Built-in path (no Ghostscript, as in release builds) must shrink too.
+        out = tmp_path / "small_builtin.pdf"
+        payload = run_engine("compress", "--input", str(src), "--output", str(out), "--quality", "small",
+                             env=dict(os.environ, FOLIO_COMPRESS_ENGINE="pymupdf"))
+        assert payload.get("ok") and payload["method"] == "pymupdf", payload
+        assert payload["after_bytes"] < payload["before_bytes"], f"built-in compress did not shrink: {payload}"
+        with fitz.open(str(out)) as d:
+            assert "Alpha page" in d[0].get_text() and d[0].get_images(), "built-in compress lost content"
 
         # Page numbers
         out = tmp_path / "nums.pdf"

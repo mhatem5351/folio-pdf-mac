@@ -523,28 +523,28 @@ private struct ToolStripView: View {
 
     @ViewBuilder
     private var ocrTools: some View {
+        // Apple Vision is built in; Tesseract (OCRmyPDF) is optional and
+        // offered in the sheet only when it is installed.
         Button {
-            store.runOCR(currentPageOnly: false)
+            store.launch(.ocr)
         } label: {
-            Label("Recognize Text", systemImage: "text.viewfinder")
+            Label("Recognize Text…", systemImage: "text.viewfinder")
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.small)
         .disabled(store.busy)
 
         Button {
-            store.runOCR(currentPageOnly: true)
+            store.recognizeTextWithVision(languages: AppStore.defaultOCRLanguageCodes,
+                                          pageSpec: String(store.currentVisiblePage()),
+                                          skipPagesWithText: !store.forceOCR)
         } label: {
             Label("This Page Only", systemImage: "doc.text.viewfinder")
         }
         .disabled(store.busy)
+        .help("Recognize the visible page with Apple Vision (Arabic + English)")
 
         Divider().frame(height: 20)
-
-        TextField("Language", text: $store.ocrLanguage)
-            .textFieldStyle(.roundedBorder)
-            .frame(width: 70)
-            .help("OCR language code, e.g. eng")
 
         Toggle("Re-run OCR", isOn: $store.forceOCR)
             .toggleStyle(.checkbox)
