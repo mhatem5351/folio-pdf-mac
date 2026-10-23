@@ -238,3 +238,15 @@ extension AppStore {
         runOCR(currentPageOnly: currentPageOnly)
     }
 }
+
+extension AppStore {
+    /// A document whose first pages carry no text is probably a scan headed
+    /// for OCR: load the recognition models now so it starts instantly.
+    func warmUpOCRIfScanned() {
+        guard let document else { return }
+        let sample = (0..<min(3, document.pageCount)).compactMap { document.page(at: $0) }
+        if sample.contains(where: { !VisionOCR.pageHasText($0) }) {
+            VisionOCR.warmUp()
+        }
+    }
+}

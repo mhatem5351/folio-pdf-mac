@@ -536,7 +536,7 @@ final class AppStore: ObservableObject {
             errorMessage = """
             macOS is blocking access to \(url.lastPathComponent).
             Reopen it with Open PDF… or drag it into the window once — \
-            or allow Desktop/Documents access for Sam PDF Studio in \
+            or allow Desktop/Documents access for PDF Studio in \
             System Settings → Privacy & Security → Files & Folders.
             """
             return
@@ -554,6 +554,7 @@ final class AppStore: ObservableObject {
             refreshHistoryState()
             addRecent(url)
             toast("Opened \(url.lastPathComponent)")
+            warmUpOCRIfScanned()
         } catch {
             report(error, while: "Opening PDF")
         }

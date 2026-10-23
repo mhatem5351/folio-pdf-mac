@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreText
 import Foundation
 import PDFKit
 import Vision
@@ -207,6 +208,50 @@ enum VisionOCR {
             progress?(done + 1, indices.count)
         }
         return Result(pages: pages, languages: languages, revision: latestRevision)
+    }
+
+    // MARK: Warm-up
+
+    private static let warmUpLock = NSLock()
+    private static var warmedLanguageSets: Set<String> = []
+
+    /// Load Vision's recognition models in the background before the user
+    /// asks for OCR. The first accurate request after a reboot (or a long
+    /// idle) spends 10–30 s loading models — macOS then keeps them cached
+    /// system-wide, so later requests take milliseconds. Runs once per
+    /// language set per launch; cheap when the models are already loaded.
+    static func warmUp(languages: [String] = AppStore.defaultOCRLanguageCodes) {
+        let key = languages.joined(separator: ",")
+        warmUpLock.lock()
+        let isNew = warmedLanguageSets.insert(key).inserted
+        warmUpLock.unlock()
+        guard isNew else { return }
+        DispatchQueue.global(qos: .utility).async {
+            guard let image = warmUpImage() else { return }
+            let request = makeRequest(languages: resolveLanguages(languages).usable, correction: true)
+            try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        }
+    }
+
+    /// A small image with real Arabic and Latin text: a blank image would stop
+    /// at text detection and never load the recognizer.
+    private static func warmUpImage() -> CGImage? {
+        let size = CGSize(width: 720, height: 120)
+        guard let context = CGContext(
+            data: nil, width: Int(size.width), height: Int(size.height),
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ) else { return nil }
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(origin: .zero, size: size))
+        let text = NSAttributedString(string: "مرحبا بالعالم Hello 2026", attributes: [
+            .font: CTFontCreateWithName("Helvetica" as CFString, 44, nil),
+            .foregroundColor: CGColor(gray: 0, alpha: 1)
+        ])
+        context.textPosition = CGPoint(x: 24, y: 40)
+        CTLineDraw(CTLineCreateWithAttributedString(text), context)
+        return context.makeImage()
     }
 
     /// Async wrapper: runs on a background queue; cancelling the Task cancels

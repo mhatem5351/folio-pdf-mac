@@ -40,6 +40,10 @@ struct OCRSheet: View {
         .onAppear {
             run.settle(storeBusy: store.busy)
             run.reset()
+            VisionOCR.warmUp(languages: selectedCodes)
+        }
+        .onChange(of: selectedCodes) { _, codes in
+            if !detectAutomatically { VisionOCR.warmUp(languages: codes) }
         }
         .onChange(of: store.busy) { _, busy in
             // The engine step finished (success closes the sheet; a failure
