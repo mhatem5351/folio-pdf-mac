@@ -16,7 +16,7 @@ by Sam Wasserman (Apache-2.0) — see [NOTICE](NOTICE).
 
 | Area | What you can do |
 |---|---|
-| **Edit** | Click a paragraph and type — same font, size and color; move/resize blocks; Arabic and right-to-left text shaped correctly. Select an existing image to move, resize (handles), rotate, replace, extract or delete it — only that placement changes. Add text, images and links. Redact. |
+| **Edit** | Click a paragraph and type — same font, size and color; text below reflows (pushed down / pulled up) when a paragraph grows or shrinks; move/resize blocks; Arabic and right-to-left text shaped correctly and copies/extracts in logical order. Select an existing image to move, resize (handles), rotate, replace, extract or delete it — only that placement changes. Add text, images and links. Redact. |
 | **Annotate & review** | Highlight / underline / strike, notes, text boxes, signatures, review marks (strikeout, squiggly, insert, replace), comments list in the sidebar. |
 | **Forms** | Fill forms; create text, paragraph, checkbox, radio, dropdown, list and signature fields by dragging on the page; **Auto-Detect** blanks (`Name: ____`, boxes, checkboxes) like "Prepare Form". |
 | **Pages** | Thumbnail grid: select, drag to reorder, rotate, insert, copy/paste, extract, delete; merge files; page numbers; uniform page size; split by ranges, every N pages, bookmarks or file size. |
