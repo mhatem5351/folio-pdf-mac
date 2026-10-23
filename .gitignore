@@ -6,3 +6,4 @@ Engine/.venv/
 .DS_Store
 __pycache__/
 *.pyc
+.claude/
