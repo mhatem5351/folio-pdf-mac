@@ -685,7 +685,7 @@ final class PDFEngineClient {
         return try run(args)
     }
 
-    private func run(_ args: [String]) throws -> EngineCommandResult {
+    func run(_ args: [String]) throws -> EngineCommandResult {
         guard FileManager.default.fileExists(atPath: pythonURL.path) else {
             throw PDFEngineError.missingEngine("Missing engine Python at \(pythonURL.path). Run script/bootstrap_engine.sh.")
         }

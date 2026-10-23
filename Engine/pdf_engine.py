@@ -2583,6 +2583,43 @@ def cmd_enhance_scan(args: argparse.Namespace) -> int:
     return respond(True, output=str(output), pages=len(images), bytes=output.stat().st_size)
 
 
+def engine_api() -> Any:
+    """Shared helpers handed to extension modules in Engine/ext/."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        respond=respond,
+        ensure_parent=ensure_parent,
+        parse_page_spec=parse_page_spec,
+        safe_stem=safe_stem,
+        version=ENGINE_VERSION,
+    )
+
+
+def load_extensions(subparsers: Any) -> None:
+    """Register commands from every Engine/ext/*.py module.
+
+    Each module exposes ``register(subparsers, api)``. Modules must import
+    heavy dependencies (fitz, PIL, ...) lazily inside their commands so that
+    loading every extension stays cheap for each engine invocation.
+    """
+    import importlib.util
+
+    ext_dir = Path(__file__).resolve().parent / "ext"
+    if not ext_dir.is_dir():
+        return
+    api = engine_api()
+    for path in sorted(ext_dir.glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        spec = importlib.util.spec_from_file_location(f"pdfstudio_ext_{path.stem}", path)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.register(subparsers, api)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Sam PDF Studio private PDF engine")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2912,6 +2949,7 @@ def build_parser() -> argparse.ArgumentParser:
     images_pdf.add_argument("--dpi", type=int, default=200)
     images_pdf.set_defaults(func=cmd_images_to_pdf)
 
+    load_extensions(subparsers)
     return parser
 
 

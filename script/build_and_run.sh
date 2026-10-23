@@ -39,6 +39,10 @@ chmod +x "$APP_BINARY"
 # would hang on a folder-permission prompt when spawning the engine.
 cp "$ROOT_DIR/Engine/pdf_engine.py" "$APP_CONTENTS/Resources/pdf_engine.py"
 ENGINE_SCRIPT="$APP_CONTENTS/Resources/pdf_engine.py"
+# Engine extension modules (Engine/ext/*.py) are loaded relative to the script.
+rm -rf "$APP_CONTENTS/Resources/ext"
+mkdir -p "$APP_CONTENTS/Resources/ext"
+cp "$ROOT_DIR"/Engine/ext/*.py "$APP_CONTENTS/Resources/ext/" 2>/dev/null || true
 
 # Bundle the first-run engine installer + its requirements so a distributed
 # .app can self-install the Python engine on a Mac that never ran this script.

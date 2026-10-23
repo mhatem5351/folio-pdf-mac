@@ -74,6 +74,10 @@ struct ContentView: View {
         .sheet(isPresented: $store.showSignatureManager) {
             SignatureManagerView()
         }
+        .sheet(item: $store.activeTool) { tool in
+            ToolSheetHost(tool: tool)
+                .environmentObject(store)
+        }
         .alert(
             "Something went wrong",
             isPresented: Binding(

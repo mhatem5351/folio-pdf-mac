@@ -182,6 +182,10 @@ final class AppStore: ObservableObject {
     @Published var lastMessage: String = ""
     @Published var errorMessage: String?
     @Published var showSidebar: Bool = true
+    /// Catalog tool whose sheet is open (ToolSheetHost), nil when none.
+    @Published var activeTool: ToolID?
+    /// Command palette (⌘K) visibility.
+    @Published var showCommandPalette: Bool = false
     @Published var recentFiles: [URL] = []
 
     // Canvas selection state (engine coordinates).
@@ -1935,7 +1939,7 @@ final class AppStore: ObservableObject {
     }
 
     /// Run an engine command from the current version into the next version.
-    private func runEngineOp(title: String, onDone: (() -> Void)? = nil, work: @escaping (URL, URL) throws -> Void) {
+    func runEngineOp(title: String, onDone: (() -> Void)? = nil, work: @escaping (URL, URL) throws -> Void) {
         guard let session else {
             toast("Open a PDF first")
             return
@@ -1976,7 +1980,7 @@ final class AppStore: ObservableObject {
     }
 
     /// Run an engine command whose output is not the working document.
-    private func runEngineJob(title: String, work: @escaping () throws -> URL, onSuccess: @escaping (URL) -> Void) {
+    func runEngineJob(title: String, work: @escaping () throws -> URL, onSuccess: @escaping (URL) -> Void) {
         busy = true
         busyTitle = title
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -2030,7 +2034,7 @@ final class AppStore: ObservableObject {
         reveal(url)
     }
 
-    private func toast(_ message: String) {
+    func toast(_ message: String) {
         lastMessage = message
         let stamp = message
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
@@ -2040,7 +2044,7 @@ final class AppStore: ObservableObject {
         }
     }
 
-    private func report(_ error: Error, while title: String) {
+    func report(_ error: Error, while title: String) {
         errorMessage = "\(title) failed.\n\(error.localizedDescription)"
     }
 
@@ -2055,7 +2059,7 @@ final class AppStore: ObservableObject {
         return alert.runModal() == .alertFirstButtonReturn
     }
 
-    private func confirmDiscardIfDirty() -> Bool {
+    func confirmDiscardIfDirty() -> Bool {
         guard isDirty else { return true }
         let alert = NSAlert()
         alert.messageText = "You have unsaved changes to \(documentName)."
