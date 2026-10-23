@@ -2616,6 +2616,8 @@ def load_extensions(subparsers: Any) -> None:
         if spec is None or spec.loader is None:
             continue
         module = importlib.util.module_from_spec(spec)
+        # Registered before exec so dataclasses/typing can resolve the module.
+        sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         module.register(subparsers, api)
 
