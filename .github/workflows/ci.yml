@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    name: Build the macOS app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift build (release)
+        run: swift build -c release
+      - name: Swift QA harnesses
+        run: |
+          swiftc Sources/FolioPDF/Models/DocumentSession.swift Tests/qa_session_semantics.swift -o qa_session
+          ./qa_session
+
+  engine:
+    name: Engine test suites
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install the pinned release packages
+        run: |
+          python -m pip install --only-binary=:all: --no-deps -r Engine/requirements-bundle.txt
+      - name: Run suites
+        run: |
+          set -e
+          for suite in qa_ui_invariants qa_unicode_args qa_pdf_tools qa_style_match qa_block_move \
+                       qa_reflow qa_line_pitch qa_rtl_extraction qa_arabic_edit qa_forms qa_stamps \
+                       qa_document qa_images; do
+            echo "::group::$suite"
+            python -W ignore "Tests/$suite.py"
+            echo "::endgroup::"
+          done

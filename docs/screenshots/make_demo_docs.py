@@ -152,25 +152,49 @@ def main() -> None:
     doc.save(str(base))
 
     # Arabic page through the engine's RTL writer (shaped, logical copy/paste).
-    step = out / "step.pdf"
-    engine("add-text", "--input", str(base), "--output", str(step), "--page", "2", "--x", "56", "--y", "70",
-           "--text", "ملخص تنفيذي", "--font-size", "26", "--bold", "--align", "right", "--color", "#1c1f29")
+    # add-text's "auto" alignment right-aligns inside the text's natural width,
+    # so measure that on a scratch page first and anchor it to the right margin.
+    scratch = out / "scratch.pdf"
+    blank = fitz.open()
+    blank.new_page(width=595, height=842)
+    blank.save(str(scratch))
+
+    def add_rtl(src: Path, dst: Path, y: float, text: str, size: float, color: str, bold: bool = False) -> Path:
+        extra = ["--bold"] if bold else []
+        probe = out / "probe.pdf"
+        engine("add-text", "--input", str(scratch), "--output", str(probe), "--page", "1", "--x", "56", "--y", str(y),
+               "--text", text, "--font-size", str(size), "--color", color, *extra)
+        with fitz.open(str(probe)) as d:  # ink extent (text spans carry /ActualText)
+            pix = d[0].get_pixmap(dpi=144, colorspace=fitz.csGRAY)
+        cols = [x for x in range(pix.width) if any(pix.pixel(x, y)[0] < 200 for y in range(0, pix.height, 2))]
+        width = (cols[-1] + 1) / 2 - 56
+        probe.unlink()
+        engine("add-text", "--input", str(src), "--output", str(dst), "--page", "2", "--x", f"{539 - width:.1f}",
+               "--y", str(y), "--text", text, "--font-size", str(size), "--color", color, *extra)
+        return dst
+
+    current = add_rtl(base, out / "step.pdf", 70, "ملخص تنفيذي", 26, "#1c1f29", bold=True)
     paragraphs = [
         (118, "حققت لومن لابس في عام 2026 نتائج قياسية، إذ ارتفعت الإيرادات إلى 4.2 مليون دولار\nبفضل إطلاق منصة المستندات وزيادة العملاء العائدين بنسبة 38٪."),
-        (190, "نركّز في العام المقبل على تسريع انضمام الفرق الجديدة، ودعم كامل للغة العربية\nوالكتابة من اليمين إلى اليسار، ومحرر مفتوح المصدر متاح للجميع مجاناً."),
+        (176, "نركّز في العام المقبل على تسريع انضمام الفرق الجديدة، ودعم كامل للغة العربية\nوالكتابة من اليمين إلى اليسار، ومحرر مفتوح المصدر متاح للجميع مجاناً."),
     ]
-    current = step
     for i, (y, text) in enumerate(paragraphs):
-        nxt = out / f"step{i}.pdf"
-        engine("add-text", "--input", str(current), "--output", str(nxt), "--page", "2", "--x", "56", "--y", str(y),
-               "--text", text, "--font-size", "13", "--align", "right", "--color", "#1c1f29")
-        current = nxt
+        current = add_rtl(current, out / f"step{i}.pdf", y, text, 13, "#1c1f29")
     figures = [("الإيرادات", "4.2 مليون دولار"), ("العملاء العائدون", "+38٪"), ("المستخدمون النشطون", "12,000")]
     for i, (label, value) in enumerate(figures):
-        nxt = out / f"fig{i}.pdf"
-        engine("add-text", "--input", str(current), "--output", str(nxt), "--page", "2", "--x", "56", "--y", str(290 + i * 34),
-               "--text", f"{label}: {value}", "--font-size", "14", "--align", "right", "--color", "#4f46e5")
-        current = nxt
+        current = add_rtl(current, out / f"fig{i}.pdf", 250 + i * 30, f"{label}: {value}", 14, "#4f46e5")
+    current = add_rtl(current, out / "h2.pdf", 362, "أبرز الإنجازات", 18, "#1c1f29", bold=True)
+    highlights = [
+        "• أطلقنا أدوات PDF يستخدمها 12,000 شخص كل شهر",
+        "• وقّعنا شراكات مع ثلاثة بنوك إقليمية",
+        "• حققنا الربحية في الربع الثاني من العام",
+    ]
+    for i, line in enumerate(highlights):
+        current = add_rtl(current, out / f"hl{i}.pdf", 398 + i * 26, line, 13, "#1c1f29")
+    closing = ("نشكر فريقنا وعملاءنا وشركاءنا على ثقتهم، ونتطلع إلى عام جديد\n"
+               "من النمو والابتكار في خدمة المستخدمين العرب حول العالم.")
+    current = add_rtl(current, out / "close.pdf", 500, closing, 13, "#545a6e")
+    scratch.unlink()
 
     final = fitz.open(str(current))
     scanned_page(final, final)
@@ -179,8 +203,9 @@ def main() -> None:
     final.save(str(target), garbage=4, deflate=True)
     for f in out.glob("step*.pdf"):
         f.unlink()
-    for f in out.glob("fig*.pdf"):
-        f.unlink()
+    for pattern in ("fig*.pdf", "hl*.pdf", "h2.pdf", "close.pdf"):
+        for f in out.glob(pattern):
+            f.unlink()
     base.unlink()
     print(target)
 

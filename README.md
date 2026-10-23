@@ -67,7 +67,7 @@ curl -fsSL https://raw.githubusercontent.com/mhatem5351/folio-pdf-mac/main/insta
 | 🌍 **Arabic & RTL** | Arabic is shaped with HarfBuzz and written with an `/ActualText` layer, so copy, paste, search and text export come out in logical order. Text direction is detected automatically, with right alignment for Arabic. |
 | 🖼️ **Edit images** | Select an image on the page to move it, resize it with handles, rotate, replace, extract or delete it. Only that image changes; the rest of the page stays as it was. |
 | 🔎 **OCR** | Apple Vision OCR runs on your Mac and supports Arabic, English and more than 30 other languages. It adds an invisible, searchable text layer to scans. Folio prepares Vision as soon as it detects a scanned document. Tesseract is also supported. |
-| 📝 **Forms** | Fill in forms. **Auto-detect** finds blanks (`Name: ____`), boxes and checkboxes and turns them into fields. You can also draw text, checkbox, radio, dropdown, list and signature fields yourself. |
+| 📝 **Forms** | Fill in forms right on the page; **Tab** moves to the next field. **Auto-detect** finds blanks (`Name: ____`), boxes and checkboxes, labels them and turns them into fields. You can also draw text, checkbox, radio, dropdown, list and signature fields yourself. |
 | ✒️ **Sign & annotate** | Signatures, highlights, underline, strikethrough, notes, text boxes and review marks, plus a comments list in the sidebar. |
 | 📑 **Organize pages** | A thumbnail grid where you can drag to reorder pages, and rotate, insert, copy, paste, extract or delete them. You can also merge files, add page numbers, make page sizes uniform and split a file by ranges, every N pages, bookmarks or file size. |
 | 💧 **Stamp** | Text or image watermarks, including Arabic, with opacity and rotation. Headers and footers with `{page}`, `{pages}`, `{date}` and `{title}` fields. Bates numbering. |
@@ -131,7 +131,7 @@ To build the downloadable, self-contained app (it bundles a standalone CPython w
 ./script/qa.sh                      # builds, then runs every engine and UI-invariant suite
 ```
 
-The suites in `Tests/` cover editing and reflow, line spacing, Arabic shaping and extraction, OCR layers, forms, stamps, conversion and a matrix of more than 100 engine operations.
+The suites in `Tests/` cover editing and reflow, line spacing, Arabic shaping and extraction, OCR layers, forms, stamps, conversion and a matrix of more than 100 engine operations. CI builds the app and runs the engine suites on every push.
 
 ## How it works
 

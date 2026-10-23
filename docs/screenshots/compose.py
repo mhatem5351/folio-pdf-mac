@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "docs" / "images"
 SF = "/System/Library/Fonts/SFNS.ttf"
 ICON = ROOT / "Resources" / "AppIcon.png"
+SHEET_TOP = 166  # px below the window top where macOS attaches sheets (2x capture)
 
 
 def font(size: int, weight: str = "Regular") -> ImageFont.FreeTypeFont:
@@ -146,20 +147,29 @@ def main() -> None:
 
     def load(name: str) -> Image.Image | None:
         p = shots / f"{name}.png"
-        return Image.open(p).convert("RGBA") if p.exists() else None
+        if not p.exists():
+            return None
+        img = Image.open(p).convert("RGBA")
+        sheet_path = shots / f"{name}.sheet.png"
+        if sheet_path.exists():  # an attached sheet is captured separately
+            sheet = Image.open(sheet_path).convert("RGBA")
+            layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            paste_with_shadow(layer, sheet, ((img.width - sheet.width) // 2, SHEET_TOP), blur=30, offset=16, alpha=170)
+            img = Image.alpha_composite(img, layer)
+        return img
 
     if (s := load("edit")) is not None:
         hero(s, OUT / "hero.png")
     cards = [
-        ("edited", "feature-edit", "Edit text like a word processor", "Same font, size and color; paragraphs below reflow automatically.", "indigo", None),
+        ("edited", "feature-edit", "Edit text like a word processor", "Same font, size, color and line spacing; the paragraphs below reflow.", "indigo", None),
         ("arabic", "feature-arabic", "Arabic & right-to-left, done right", "Shaped, joined text that copies and searches in logical order.", "teal", None),
         ("pages", "feature-pages", "Organize pages", "Drag to reorder, rotate, insert, extract, split and merge.", "slate", None),
         ("tools", "feature-tools", "Every tool, one click away", "Forms, OCR, protect, stamp, convert, compare and more.", "rose", None),
         ("palette", "feature-palette", "Command palette", "Press ⌘K and type what you want to do.", "indigo", None),
-        ("ocr", "feature-ocr", "OCR scanned documents", "Apple Vision on-device: Arabic, English and 30+ languages.", "amber", None),
-        ("forms", "feature-forms", "Fill and create forms", "Auto-detect blanks and checkboxes, or draw fields yourself.", "teal", None),
-        ("stamp", "feature-stamp", "Watermarks, signatures & annotations", "Stamps, headers and footers, Bates numbers, highlights and notes.", "rose", None),
-        ("print", "feature-print", "Print to USB HP LaserJet", "Built-in support for host-based LaserJets that macOS dropped.", "slate", None),
+        ("ocr_search", "feature-ocr", "OCR scanned documents", "Apple Vision on-device: scans become searchable, in Arabic and 30+ languages.", "amber", None),
+        ("forms", "feature-forms", "Fill and create forms", "Auto-detect turns blanks and boxes into fields; Tab moves between them.", "teal", None),
+        ("wm", "feature-stamp", "Watermarks, stamps & signatures", "Live preview, any language, over or behind the page.", "rose", None),
+        ("print", "feature-print", "Print to a USB HP LaserJet", "Built-in support for host-based LaserJets that macOS dropped.", "slate", None),
         ("welcome", "feature-welcome", "Private by design", "Everything runs on your Mac. No account, no upload, no subscription.", "indigo", None),
     ]
     for src, name, title, subtitle, accent, crop in cards:
