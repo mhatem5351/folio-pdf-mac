@@ -115,6 +115,17 @@ case "$MODE" in
   build)
     echo "✓ built $APP_BUNDLE"
     ;;
+  install)
+    # Replace the copy in /Applications and forget the dev bundle so only one
+    # "PDF Studio" shows up in Spotlight, Launchpad and Open With.
+    pkill -x "$APP_NAME" 2>/dev/null || true
+    rm -rf "/Applications/PDF Studio.app"
+    /usr/bin/ditto "$APP_BUNDLE" "/Applications/PDF Studio.app"
+    LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+    "$LSREGISTER" -u "$APP_BUNDLE" 2>/dev/null || true
+    "$LSREGISTER" -f "/Applications/PDF Studio.app"
+    echo "✓ installed /Applications/PDF Studio.app"
+    ;;
   run)
     open_app
     ;;
@@ -135,7 +146,7 @@ case "$MODE" in
     pgrep -x "$APP_NAME" >/dev/null
     ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2
+    echo "usage: $0 [run|build|install|--debug|--logs|--telemetry|--verify]" >&2
     exit 2
     ;;
 esac

@@ -38,8 +38,8 @@ Requires macOS 14+, Command Line Tools, Homebrew Python 3.13, and
 ```bash
 source script/dev-env.sh          # SDK + venv + build dirs
 ./script/setup-engine.sh          # first time: creates the engine venv
-./script/build_and_run.sh         # builds "PDF Studio.app" into ~/Builds/PDFStudio and opens it
-cp -R ~/Builds/PDFStudio/"PDF Studio.app" /Applications/   # install
+./script/build_and_run.sh         # builds "PDF Studio.app" into ~/Builds/PDFStudio.noindex and opens it
+./script/build_and_run.sh install # builds and replaces /Applications/PDF Studio.app
 ```
 
 > The macOS 27 SDK implements SwiftUI `@State` as a macro whose plugin ships
