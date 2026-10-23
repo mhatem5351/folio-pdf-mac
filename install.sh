@@ -53,7 +53,7 @@ if curl -fsSL "$URL.sha256" -o "$TMP/folio.sha256" 2>/dev/null; then
 fi
 
 echo "Installing to $DEST..."
-MNT="$(hdiutil attach "$TMP/folio.dmg" -nobrowse -readonly | awk -F'\t' '/\/Volumes\//{print $3; exit}')"
+MNT="$(hdiutil attach "$TMP/folio.dmg" -nobrowse -readonly 2>/dev/null | awk -F'\t' '/\/Volumes\//{print $3; exit}')"
 pkill -x FolioPDF 2>/dev/null || true
 rm -rf "$DEST/$APP"
 ditto "$MNT/$APP" "$DEST/$APP"
