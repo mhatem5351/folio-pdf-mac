@@ -497,6 +497,31 @@ def test_compare_visual() -> None:
     assert same["identical"], same
 
 
+def test_exports_control_chars_and_names() -> None:
+    """export-xlsx survives control characters in extracted text (they
+    aborted the whole workbook), and export-images names files after
+    --name instead of the session copy's "v3"."""
+    import fitz
+    from openpyxl import load_workbook
+
+    src = OUT / "v3.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((50, 80), "Bell\x07char and\x01ctrl", fontsize=12)
+    doc.save(src)
+    xlsx = OUT / "ctrl.xlsx"
+    engine("export-xlsx", "--input", str(src), "--output", str(xlsx))
+    rows = list(load_workbook(xlsx).active.iter_rows(values_only=True))
+    assert rows[1][2] == "Bellchar andctrl", rows
+    images = OUT / "images"
+    reply = engine("export-images", "--input", str(src), "--output-dir", str(images),
+                   "--format", "png", "--dpi", "36", "--name", "Quarterly Report.pdf")
+    names = [Path(p).name for p in reply["outputs"]]
+    assert names == ["Quarterly-Report-page-001.png"], names
+    reply = engine("export-images", "--input", str(src), "--output-dir", str(images), "--format", "jpg", "--dpi", "36")
+    assert [Path(p).name for p in reply["outputs"]] == ["v3-page-001.jpg"], reply
+
+
 def main() -> int:
     if OUT.exists():
         shutil.rmtree(OUT)
@@ -512,6 +537,7 @@ def main() -> int:
         ("compare text/reflow", test_compare_text_reflow),
         ("compare identical + Arabic", lambda: test_compare_identical_and_arabic(files)),
         ("compare visual", test_compare_visual),
+        ("exports: control chars + image names", test_exports_control_chars_and_names),
     ]
     for name, step in steps:
         step()

@@ -149,8 +149,11 @@ private struct AppCommands: Commands {
 
         CommandGroup(after: .sidebar) {
             Button("Find in Document") {
+                // The Pages grid has no sidebar; search in the reader.
+                if store.selectedOperation == .pages { store.selectedOperation = .read }
                 store.showSidebar = true
                 store.sidebarTab = .search
+                store.searchFocusRequest += 1
             }
             .keyboardShortcut("f")
             .disabled(store.document == nil)

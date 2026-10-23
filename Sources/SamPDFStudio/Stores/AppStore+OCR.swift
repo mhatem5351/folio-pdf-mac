@@ -67,6 +67,22 @@ extension AppStore {
         return ["ar-SA", "en-US"].filter { available.contains($0) }
     }
 
+    /// Tesseract models (`<code>.traineddata`) found in the usual tessdata
+    /// folders; empty when none is found (then every mapped language is offered).
+    static let installedTesseractModels: Set<String> = {
+        var folders = ["/opt/homebrew/share/tessdata", "/usr/local/share/tessdata"]
+        if let prefix = ProcessInfo.processInfo.environment["TESSDATA_PREFIX"] {
+            folders.insert(prefix, at: 0)
+        }
+        var models = Set<String>()
+        for folder in folders {
+            for file in (try? FileManager.default.contentsOfDirectory(atPath: folder)) ?? [] where file.hasSuffix(".traineddata") {
+                models.insert(String(file.dropLast(".traineddata".count)))
+            }
+        }
+        return models
+    }()
+
     /// Languages Vision recognizes on this Mac (accurate level, newest
     /// revision), Arabic and English first, then the rest by name.
     static let ocrLanguages: [OCRLanguage] = {
@@ -85,7 +101,12 @@ extension AppStore {
                 : (english.localizedString(forIdentifier: code) ?? code)
             let native = locale.localizedString(forIdentifier: code) ?? ""
             let base = code.split(separator: "-").first.map(String.init) ?? code
-            let tesseractCode = tesseract[code] ?? tesseract[base]
+            // Only offer a Tesseract model that is actually installed: asking
+            // OCRmyPDF for a missing one ("ara" isn't in the default Homebrew
+            // tessdata) fails the whole run.
+            let tesseractCode = (tesseract[code] ?? tesseract[base]).flatMap { model in
+                installedTesseractModels.isEmpty || installedTesseractModels.contains(model) ? model : nil
+            }
             return OCRLanguage(code: code, name: name, nativeName: native == name ? "" : native, tesseractCode: tesseractCode)
         }
         let priority = ["ar-SA": 0, "en-US": 1]

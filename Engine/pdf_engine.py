@@ -2815,7 +2815,9 @@ def cmd_export_images(args: argparse.Namespace) -> int:
     zoom = args.dpi / 72.0
     matrix = fitz.Matrix(zoom, zoom)
     outputs: list[str] = []
-    stem = safe_stem(args.input)
+    # The app exports from a session copy ("v3.pdf"); --name carries the
+    # document's real file name so the images aren't called v3-page-001.png.
+    stem = safe_stem(args.name or args.input)
 
     for index, page in enumerate(doc, start=1):
         pixmap = page.get_pixmap(matrix=matrix, alpha=False)
@@ -2885,6 +2887,7 @@ def cmd_export_docx(args: argparse.Namespace) -> int:
 def cmd_export_xlsx(args: argparse.Namespace) -> int:
     import fitz
     from openpyxl import Workbook
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 
     output = Path(args.output)
     ensure_parent(output)
@@ -2895,7 +2898,10 @@ def cmd_export_xlsx(args: argparse.Namespace) -> int:
     sheet.append(["Page", "Line", "Text"])
 
     for page_index, page in enumerate(doc, start=1):
-        lines = [line.strip() for line in page.get_text("text").splitlines() if line.strip()]
+        # Control characters (e.g. NUL from glyphs without a Unicode mapping)
+        # are illegal in worksheet cells and would abort the whole export.
+        text = ILLEGAL_CHARACTERS_RE.sub("", page.get_text("text"))
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
         for line_index, line in enumerate(lines, start=1):
             sheet.append([page_index, line_index, line])
 
@@ -3334,6 +3340,7 @@ def build_parser() -> argparse.ArgumentParser:
     images.add_argument("--output-dir", required=True)
     images.add_argument("--format", choices=["png", "jpg"], default="png")
     images.add_argument("--dpi", type=int, default=200)
+    images.add_argument("--name", default=None, help="file name to base the image names on")
     images.set_defaults(func=cmd_export_images)
 
     text = subparsers.add_parser("export-text")

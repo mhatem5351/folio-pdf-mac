@@ -199,12 +199,18 @@ struct CommandPaletteView: View {
                             .buttonStyle(.plain)
                             .disabled(!command.enabled)
                             .opacity(command.enabled ? 1 : 0.4)
-                            .id(index)
+                            // Identity must follow the command, not the row
+                            // position: keying rows by index made filtered rows keep
+                            // showing the unfiltered first entry ("Open PDF…")
+                            // while Return ran the real match.
+                            .id(command.id)
                         }
                     }
                     .padding(Theme.Spacing.s)
                 }
-                .onChange(of: highlighted) { _, index in proxy.scrollTo(index) }
+                .onChange(of: highlighted) { _, index in
+                    if results.indices.contains(index) { proxy.scrollTo(results[index].id) }
+                }
             }
             .frame(height: 360)
         }

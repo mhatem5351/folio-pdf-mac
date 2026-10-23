@@ -202,6 +202,9 @@ final class AppStore: ObservableObject {
     @Published var showToolsHub: Bool = false
     /// Which panel the left sidebar shows.
     @Published var sidebarTab: SidebarTab = .pages
+    /// Bumped by Find (⌘F) so the sidebar search field takes focus even when
+    /// the search tab is already showing.
+    @Published var searchFocusRequest = 0
     @Published var recentFiles: [URL] = []
 
     // Canvas selection state (engine coordinates).
@@ -363,7 +366,7 @@ final class AppStore: ObservableObject {
     var documentName: String { session?.originalURL.lastPathComponent ?? "PDF Studio" }
 
     init() {
-        signatureText = UserDefaults.standard.string(forKey: "signatureText") ?? "Sam Wasserman"
+        signatureText = UserDefaults.standard.string(forKey: "signatureText") ?? NSFullUserName()
         if let path = UserDefaults.standard.string(forKey: "activeSignaturePath"),
            FileManager.default.fileExists(atPath: path) {
             activeSignatureURL = URL(fileURLWithPath: path)
@@ -546,6 +549,10 @@ final class AppStore: ObservableObject {
             return
         }
         do {
+            // A tool sheet left open (e.g. a file opened from Finder while the
+            // Images sheet was up) would keep showing — and acting on — the
+            // previous document's pages, xrefs and fields.
+            activeTool = nil
             session?.cleanup()
             let newSession = try DocumentSession(originalURL: url)
             session = newSession
@@ -556,6 +563,14 @@ final class AppStore: ObservableObject {
             documentRevision += 1
             clearCanvasSelection()
             refreshHistoryState()
+            // PDFKit keeps the scroll offset when the view's document is
+            // replaced, so a newly opened file would land on the previous
+            // file's page. Start every opened file at its first page.
+            DispatchQueue.main.async { [weak self] in
+                guard let view = self?.pdfViewProxy.pdfView,
+                      let first = view.document?.page(at: 0) else { return }
+                view.go(to: first)
+            }
             addRecent(url)
             toast("Opened \(url.lastPathComponent)")
             warmUpOCRIfScanned()
@@ -967,12 +982,25 @@ final class AppStore: ObservableObject {
             let aspect = image.size.width / image.size.height
             width = max(24.0, (targetHeight * aspect).rounded())
         }
+        let box = clampedPlacement(page: page, x: x, y: y, width: width, height: targetHeight)
         runEngineOp(title: "Sign") { [engine] input, output in
             _ = try engine.addImage(
                 input: input, output: output, image: url,
-                page: page, x: x, y: y, width: width, height: targetHeight
+                page: page, x: box.x, y: box.y, width: box.width, height: box.height
             )
         }
+    }
+
+    /// Keep a box placed at a click (top-left at x, y) entirely on the page,
+    /// shrinking it if the page is smaller — a click near the right or bottom
+    /// edge used to push half the image or signature off the page.
+    private func clampedPlacement(page: Int, x: Double, y: Double, width: Double, height: Double) -> (x: Double, y: Double, width: Double, height: Double) {
+        guard let size = document?.page(at: page - 1)?.bounds(for: .cropBox).size,
+              size.width > 0, size.height > 0, width > 0, height > 0 else { return (x, y, width, height) }
+        let pageWidth = Double(size.width), pageHeight = Double(size.height)
+        let scale = min(1, pageWidth / width, pageHeight / height)
+        let w = width * scale, h = height * scale
+        return (min(max(0, x), pageWidth - w), min(max(0, y), pageHeight - h), w, h)
     }
 
     // MARK: Saved signatures (Application Support)
@@ -1079,10 +1107,11 @@ final class AppStore: ObservableObject {
             let aspect = nsImage.size.height / nsImage.size.width
             height = (width * aspect).rounded()
         }
+        let box = clampedPlacement(page: page, x: x, y: y, width: width, height: height)
         runEngineOp(title: "Place Image") { [engine] input, output in
             _ = try engine.addImage(
                 input: input, output: output, image: image,
-                page: page, x: x, y: y, width: width, height: height
+                page: page, x: box.x, y: box.y, width: box.width, height: box.height
             )
         }
     }
@@ -1631,11 +1660,30 @@ final class AppStore: ObservableObject {
               source >= 0, source < document.pageCount,
               destination >= 0, destination <= document.pageCount,
               let page = document.page(at: source) else { return }
+        // PDFKit drops a bookmark's link to a page that is removed and
+        // re-inserted (it was saved pointing at the old position), so
+        // remember which bookmarks target this page and re-point them.
+        let bookmarks = outlineItems(pointingAt: page, in: document.outlineRoot)
         document.removePage(at: source)
         let target = source < destination ? destination - 1 : destination
         document.insert(page, at: min(target, document.pageCount))
+        for (item, point) in bookmarks {
+            item.destination = PDFDestination(page: page, at: point)
+        }
         selectedPageIndices = []
         commitDocumentChange(title: "Reorder Pages")
+    }
+
+    private func outlineItems(pointingAt page: PDFPage, in item: PDFOutline?) -> [(PDFOutline, NSPoint)] {
+        guard let item else { return [] }
+        var found: [(PDFOutline, NSPoint)] = []
+        if let destination = item.destination, destination.page === page {
+            found.append((item, destination.point))
+        }
+        for index in 0..<item.numberOfChildren {
+            found += outlineItems(pointingAt: page, in: item.child(at: index))
+        }
+        return found
     }
 
     func extractSelectedPages() {
@@ -1705,7 +1753,8 @@ final class AppStore: ObservableObject {
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
         var added = 0
         for url in panel.urls {
-            guard let other = PDFDocument(url: url) else { continue }
+            // A locked (password-protected) file would add blank pages.
+            guard let other = PDFDocument(url: url), !other.isLocked else { continue }
             for index in 0..<other.pageCount {
                 if let page = other.page(at: index), let copy = page.copy() as? PDFPage {
                     document.insert(copy, at: document.pageCount)
@@ -1740,7 +1789,14 @@ final class AppStore: ObservableObject {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
         let output = stagingDir.appendingPathComponent("Merged \(formatter.string(from: Date())).pdf")
-        let inputs = panel.urls
+        // A password-protected (or unreadable) file used to fail the whole
+        // merge with a raw engine trace; leave it out and say so instead.
+        let skipped = panel.urls.filter { PDFDocument(url: $0)?.isLocked ?? true }
+        let inputs = panel.urls.filter { !skipped.contains($0) }
+        guard inputs.count >= 2 else {
+            toast("Can't merge \(skipped.map(\.lastPathComponent).joined(separator: ", ")) — remove the password first")
+            return
+        }
         runEngineJob(title: "Merge PDFs") { [engine] in
             _ = try engine.merge(inputs: inputs, output: output)
             return output
@@ -1748,7 +1804,11 @@ final class AppStore: ObservableObject {
             guard let self else { return }
             self.loadPDF(url)
             self.selectedOperation = .pages
-            self.toast("Merged \(inputs.count) PDFs — arrange the pages, then Save (⌘S)")
+            if skipped.isEmpty {
+                self.toast("Merged \(inputs.count) PDFs — arrange the pages, then Save (⌘S)")
+            } else {
+                self.toast("Merged \(inputs.count) PDFs — skipped \(skipped.count) password-protected")
+            }
         }
     }
 
@@ -1818,7 +1878,8 @@ final class AppStore: ObservableObject {
         var savedResult: (before: Int, after: Int)?
         runEngineOp(title: "Reduce File Size", onDone: { [weak self] in
             if let result = savedResult, result.before > 0 {
-                let percent = 100 - Int(Double(result.after) / Double(result.before) * 100)
+                // Round the saving down so a 99.9% reduction never reads "−100%".
+                let percent = Int(((1 - Double(result.after) / Double(result.before)) * 100).rounded(.down))
                 let formatter = ByteCountFormatter()
                 self?.lastMessage = percent > 0
                     ? "Reduced \(formatter.string(fromByteCount: Int64(result.before))) → \(formatter.string(fromByteCount: Int64(result.after))) (−\(percent)%)"
@@ -1937,8 +1998,9 @@ final class AppStore: ObservableObject {
         panel.prompt = "Export Here"
         panel.message = "Choose a folder for the page images"
         guard panel.runModal() == .OK, let folder = panel.url, let input = currentPDFURL else { return }
+        let name = documentName
         runEngineJob(title: "Export \(format.title) Images") { [engine] in
-            _ = try engine.exportImages(input: input, outputDirectory: folder, format: format, dpi: 200)
+            _ = try engine.exportImages(input: input, outputDirectory: folder, format: format, dpi: 200, name: name)
             return folder
         } onSuccess: { [weak self] url in
             self?.revealAndToast(url)
@@ -1979,7 +2041,9 @@ final class AppStore: ObservableObject {
     }
 
     /// Run an engine command from the current version into the next version.
-    func runEngineOp(title: String, onDone: (() -> Void)? = nil, work: @escaping (URL, URL) throws -> Void) {
+    /// `title` names the action (busy pill, "<title> failed."); `success` is
+    /// the toast shown when it finishes (defaults to `title`).
+    func runEngineOp(title: String, success: String? = nil, onDone: (() -> Void)? = nil, work: @escaping (URL, URL) throws -> Void) {
         guard let session else {
             toast("Open a PDF first")
             return
@@ -2007,7 +2071,7 @@ final class AppStore: ObservableObject {
                     self.clearCanvasSelection()
                     self.refreshHistoryState()
                     self.restoreScrollPosition(position)
-                    self.toast(title)
+                    self.toast(success ?? title)
                     onDone?()
                 }
             } catch {

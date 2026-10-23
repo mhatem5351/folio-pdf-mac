@@ -145,6 +145,24 @@ def main() -> int:
     # Mode list stays lean — no Jobs/engine plumbing exposed as a mode.
     assert_absent(operations, "case jobs", "jobs must not be a top-level mode")
 
+    # Regressions found in the manual UI smoke (Oct 2026).
+    palette = read("Views/Shell/ToolsHubView.swift")
+    assert_absent(palette, ".id(index)", "palette rows keyed by position show stale entries when filtered")
+    assert_contains(palette, ".id(command.id)", "palette rows are keyed by command")
+    grid = read("Views/PagesGridView.swift")
+    assert_absent(grid, "toggleSelection(index)", "plain click in the page grid must not add to the selection")
+    assert_contains(grid, "flags.contains(.command)", "page grid ⌘-click toggles")
+    load_pdf = app_store.split("func loadPDF(")[1].split("\n    func ")[0]
+    assert_contains(load_pdf, "activeTool = nil", "opening a file closes a stale tool sheet")
+    assert_contains(load_pdf, "view.go(to: first)", "opening a file starts at page 1")
+    move_page = app_store.split("func movePage(")[1].split("\n    func ")[0]
+    assert_contains(move_page, "item.destination = PDFDestination(page: page", "reordering keeps bookmarks on the page")
+    tools = read("Stores/AppStore+Tools.swift")
+    print_doc = tools.split("func printDocument()")[1].split("\n    func ")[0]
+    assert_absent(print_doc, "let view = pdfViewProxy.pdfView else", "system print must not need the canvas PDFView")
+    bookmarks = read("Features/Document/DocumentToolSheets.swift")
+    assert_absent(bookmarks, "entries.swapAt(index, target)", "bookmark move must carry the whole subtree")
+
     print("UI invariants ok")
     return 0
 

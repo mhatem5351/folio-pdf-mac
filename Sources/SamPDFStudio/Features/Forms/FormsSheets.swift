@@ -1060,9 +1060,12 @@ private struct DetectionCard: View {
         let order = PDFFormFieldKind.allCases.map(\.rawValue)
         let parts = counts.keys.sorted { (order.firstIndex(of: $0) ?? 99) < (order.firstIndex(of: $1) ?? 99) }
             .map { type -> String in
-                let title = (PDFFormFieldKind(rawValue: type)?.title ?? type).lowercased()
+                let kind = PDFFormFieldKind(rawValue: type)
+                let title = kind == .multiline ? "multiline text field" : (kind?.title ?? type).lowercased()
                 let count = counts[type] ?? 0
-                return "\(count) \(title)\(count == 1 ? "" : "s")"
+                // "checkboxes" / "list boxes", not "checkboxs".
+                let plural = title.hasSuffix("x") ? title + "es" : title + "s"
+                return "\(count) \(count == 1 ? title : plural)"
             }
         let pages = Set(suggestions.map(\.page)).count
         return parts.joined(separator: " · ") + " on \(pages) page\(pages == 1 ? "" : "s")"

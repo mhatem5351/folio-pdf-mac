@@ -333,7 +333,10 @@ private struct SearchPanel: View {
                 .padding(.bottom, Theme.Spacing.s)
             }
         }
-        .onAppear { focused = true }
+        // Deferred: the PDF canvas grabs first responder in the same pass,
+        // which left the field unfocused so typing went nowhere.
+        .onAppear { DispatchQueue.main.async { focused = true } }
+        .onChange(of: store.searchFocusRequest) { focused = true }
         .onChange(of: store.documentRevision) { runSearch() }
     }
 
@@ -383,10 +386,18 @@ private struct SearchPanel: View {
     }
 
     private static func context(for selection: PDFSelection, term: String) -> AttributedString {
-        guard let extended = selection.copy() as? PDFSelection else { return AttributedString(term) }
-        extended.extend(atStart: 30)
-        extended.extend(atEnd: 40)
-        let raw = (extended.string ?? term).replacingOccurrences(of: "\n", with: " ")
+        // Take the context from the hit's own page: extending the selection
+        // runs across page breaks, so a "Page 1" hit showed page 2's text.
+        var snippet = selection.string ?? term
+        if let page = selection.pages.first, let text = page.string as NSString? {
+            let range = selection.range(at: 0, on: page)
+            if range.location != NSNotFound, NSMaxRange(range) <= text.length {
+                let start = max(0, range.location - 30)
+                let end = min(text.length, NSMaxRange(range) + 40)
+                snippet = text.substring(with: NSRange(location: start, length: end - start))
+            }
+        }
+        let raw = snippet.replacingOccurrences(of: "\n", with: " ")
         var result = AttributedString(raw)
         if let range = result.range(of: selection.string ?? term, options: .caseInsensitive) {
             result[range].font = .system(size: 11, weight: .bold)

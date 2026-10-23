@@ -669,14 +669,16 @@ final class PDFEngineClient {
         return try run(args)
     }
 
-    func exportImages(input: URL, outputDirectory: URL, format: ImageExportFormat, dpi: Int) throws -> EngineCommandResult {
-        try run([
+    func exportImages(input: URL, outputDirectory: URL, format: ImageExportFormat, dpi: Int, name: String? = nil) throws -> EngineCommandResult {
+        var args = [
             "export-images",
             "--input", input.path,
             "--output-dir", outputDirectory.path,
             "--format", format.rawValue,
             "--dpi", String(dpi)
-        ])
+        ]
+        if let name { args += ["--name", name] }
+        return try run(args)
     }
 
     func exportText(input: URL, output: URL, format: TextExportFormat) throws -> EngineCommandResult {

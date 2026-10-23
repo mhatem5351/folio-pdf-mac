@@ -758,10 +758,21 @@ struct BookmarksSheet: View {
         return entries[index].level > 1
     }
 
-    private var canMoveUp: Bool { (selectedIndex ?? 0) > 0 }
-    private var canMoveDown: Bool {
-        guard let index = selectedIndex else { return false }
-        return index < entries.count - 1
+    private var canMoveUp: Bool { selectedIndex.flatMap(previousSibling(of:)) != nil }
+    private var canMoveDown: Bool { selectedIndex.flatMap(nextSibling(of:)) != nil }
+
+    /// Index of the sibling right before `index` (same parent), if any.
+    private func previousSibling(of index: Int) -> Int? {
+        let level = entries[index].level
+        var i = index - 1
+        while i >= 0 && entries[i].level > level { i -= 1 }
+        return i >= 0 && entries[i].level == level ? i : nil
+    }
+
+    /// Index of the sibling right after `index`'s subtree (same parent), if any.
+    private func nextSibling(of index: Int) -> Int? {
+        let end = subtree(at: index).upperBound
+        return end < entries.count && entries[end].level == entries[index].level ? end : nil
     }
 
     /// Indices of the entry and its nested children.
@@ -797,16 +808,31 @@ struct BookmarksSheet: View {
         normalizeLevels()
     }
 
+    /// Move the selected bookmark, with its nested children, past its
+    /// neighbouring sibling (and that sibling's children). Swapping single
+    /// rows would silently re-parent children to a different chapter.
     private func move(by offset: Int) {
         guard let index = selectedIndex else { return }
-        let target = index + offset
-        guard entries.indices.contains(target) else { return }
-        entries.swapAt(index, target)
+        let block = subtree(at: index)
+        let moving = Array(entries[block])
+        let insertAt: Int
+        if offset < 0 {
+            guard let previous = previousSibling(of: index) else { return }
+            insertAt = previous
+        } else {
+            guard let next = nextSibling(of: index) else { return }
+            insertAt = subtree(at: next).upperBound - block.count
+        }
+        entries.removeSubrange(block)
+        entries.insert(contentsOf: moving, at: insertAt)
         normalizeLevels()
     }
 
     private func deleteSelected() {
         guard let index = selectedIndex else { return }
+        // Promote the children one level so they don't end up nested under
+        // whichever bookmark happens to precede the deleted one.
+        for i in subtree(at: index).dropFirst() { entries[i].level -= 1 }
         entries.remove(at: index)
         normalizeLevels()
         selection = entries.isEmpty ? nil : entries[min(index, entries.count - 1)].id
@@ -1060,9 +1086,17 @@ private struct FlowBadges: View {
     var body: some View {
         FlowLayout(spacing: Theme.Spacing.xs) {
             ForEach(items, id: \.self) { item in
-                Badge(text: prefix + item.prefix(1).lowercased() + item.dropFirst(), tint: tint)
+                Badge(text: label(for: item), tint: tint)
             }
         }
+    }
+
+    /// "No printing" after a prefix; items stand alone as written, and
+    /// acronyms ("XMP metadata", "JavaScript") keep their capitals.
+    private func label(for item: String) -> String {
+        guard !prefix.isEmpty else { return item }
+        if let second = item.dropFirst().first, second.isUppercase { return prefix + item }
+        return prefix + item.prefix(1).lowercased() + item.dropFirst()
     }
 }
 
