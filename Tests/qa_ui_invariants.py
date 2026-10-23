@@ -163,6 +163,19 @@ def main() -> int:
     bookmarks = read("Features/Document/DocumentToolSheets.swift")
     assert_absent(bookmarks, "entries.swapAt(index, target)", "bookmark move must carry the whole subtree")
 
+    # Form values typed into PDFKit widgets live only in memory: they must
+    # mark the file edited and be committed before save/export/engine ops.
+    flush = app_store.split("func flushDocumentIfNeeded()")[1].split("\n    func ")[0]
+    assert_contains(flush, "makeFirstResponder(pdfView)", "flush ends an in-progress widget edit")
+    assert_contains(flush, "hasPendingFormEdits", "flush commits pending form values")
+    assert_contains(preview_view, "NSText.didChangeNotification", "canvas reports typed form values")
+    assert_contains(preview_view, ".PDFViewAnnotationHit", "canvas reports checkbox toggles")
+    assert_contains(read("Views/PDFWorkspaceView.swift"), "store.formFieldsEdited()", "form edits reach the store")
+    assert_contains(tools, "flushDocumentIfNeeded()", "tool sheets read the flushed working copy")
+    # Tab moves between form fields instead of leaving the page.
+    assert_contains(preview_view, "func handleFormTab", "Tab navigates form fields")
+    assert_contains(preview_view, "NSApp.postEvent(up, atStart: false)", "synthetic widget click queues its mouse-up")
+
     print("UI invariants ok")
     return 0
 

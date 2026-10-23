@@ -719,8 +719,10 @@ def _detect_on_page(page: Any) -> list[dict[str, Any]]:
             if r.height <= 1.6 and r.width >= 40:
                 hlines.append((r.x0, r.x1, (r.y0 + r.y1) / 2))  # rule drawn as a thin filled rect
                 continue
-            if stroke is None and (fill is None or min(fill[:3] if len(fill) >= 3 else fill) >= 0.98):
-                continue  # invisible / white background rect
+            def white(c: Any) -> bool:
+                return c is None or min(c[:3] if len(c) >= 3 else c) >= 0.98
+            if white(stroke) and white(fill):
+                continue  # invisible / white background rect (also edit whiteouts)
             if fill is not None and not _is_light(fill):
                 continue  # dark decoration, filled bullet, bar
             boxes.append(r)
@@ -818,8 +820,9 @@ def _detect_on_page(page: Any) -> list[dict[str, Any]]:
                         height = max(12.0, min(size * 1.35, 24.0))
                         rect = fitz.Rect(run.x0, bottom - height, run.x1, bottom)
                         hint = "".join(ch[0] for ch in chars[label_start:k])
-                        if not _clean_label(hint):
-                            hint = _label_below(words, rect, 12) or _label_above(words, rect, 10)
+                        if not _clean_label(hint):  # label drawn as its own text run
+                            hint = (_label_left(words, rect, 160) or _label_below(words, rect, 12)
+                                    or _label_above(words, rect, 10))
                         found.append({"rect": rect, "type": "text", "hint": hint, "source": "underscore"})
                     k = end
                     label_start = k
@@ -836,7 +839,11 @@ def _detect_on_page(page: Any) -> list[dict[str, Any]]:
             continue  # underline / table rule beneath text
         if any(_overlap_ratio(fitz.Rect(x0, y - 1, x1, y + 1), b) > 0.5 for b in boxes):
             continue  # edge of a detected box
-        hint = _label_left(words, line_rect, 160) or _label_below(words, line_rect, 14)
+        hint = _label_left(words, line_rect, 160)
+        if not hint and line_rect.width <= page_w * 0.6:
+            # A caption under a short line ("Signature"); a wide rule with
+            # text below is a footer or section separator, not a blank.
+            hint = _label_below(words, line_rect, 14)
         if not hint:
             continue
         found.append({"rect": fitz.Rect(x0, y - 16, x1, y - 0.5), "type": "text", "hint": hint, "source": "line"})

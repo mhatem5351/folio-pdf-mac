@@ -22,7 +22,10 @@ extension AppStore {
     }
 
     /// Working copy of the open document (what engine commands should read).
-    var currentDocumentURL: URL? { session?.currentURL }
+    var currentDocumentURL: URL? {
+        flushDocumentIfNeeded()
+        return session?.currentURL
+    }
 
     /// Open a catalog tool: sheet tools present through ToolSheetHost, action
     /// tools run immediately.

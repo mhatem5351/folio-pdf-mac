@@ -169,6 +169,7 @@ extension AppStore {
         run.totalPages = indices.count
         run.phase = .recognizing
 
+        flushDocumentIfNeeded()
         let input = session.currentURL
         let revision = documentRevision
         var options = VisionOCR.Options()

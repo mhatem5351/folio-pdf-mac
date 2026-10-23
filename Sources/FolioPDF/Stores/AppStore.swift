@@ -186,6 +186,8 @@ final class AppStore: ObservableObject {
         }
     }
     @Published var isDirty: Bool = false
+    /// Form values edited in the canvas but not yet committed as a version.
+    private var hasPendingFormEdits = false
     @Published var canUndo: Bool = false
     @Published var canRedo: Bool = false
 
@@ -556,6 +558,7 @@ final class AppStore: ObservableObject {
             session?.cleanup()
             let newSession = try DocumentSession(originalURL: url)
             session = newSession
+            hasPendingFormEdits = false
             document = PDFDocument(url: newSession.currentURL)
             pageCount = document?.pageCount ?? 0
             selectedEditTool = .contentText
@@ -649,6 +652,7 @@ final class AppStore: ObservableObject {
 
     func undo() {
         guard !busy else { return }
+        flushDocumentIfNeeded()
         guard let session, let url = session.undo() else { return }
         let position = captureScrollPosition()
         document = PDFDocument(url: url)
@@ -2010,7 +2014,7 @@ final class AppStore: ObservableObject {
     // MARK: - Version plumbing
 
     /// Commit an in-memory PDFKit change as a new version file.
-    private func commitDocumentChange(title: String) {
+    private func commitDocumentChange(title: String, quiet: Bool = false) {
         guard let session, let document else { return }
         guard !busy else {
             toast("Wait for \(busyTitle) to finish")
@@ -2026,7 +2030,7 @@ final class AppStore: ObservableObject {
         session.commit(url)
         documentRevision += 1
         refreshHistoryState()
-        toast(title)
+        if !quiet { toast(title) }
     }
 
     /// Discard un-committed in-memory changes by reloading the current version.
@@ -2105,15 +2109,32 @@ final class AppStore: ObservableObject {
 
     /// PDFKit-side changes that never went through commitDocumentChange
     /// (defensive; ops normally commit immediately).
-    private func flushDocumentIfNeeded() {
-        // Current design commits after every mutation, so nothing to do.
+    /// Every engine/annotation mutation commits a version right away. Form
+    /// values typed straight into PDFKit widgets are the exception: they
+    /// live only in the in-memory document until flushed here (Save, export,
+    /// undo, any engine command), so a field mid-edit is committed too.
+    func flushDocumentIfNeeded() {
+        if let pdfView = pdfViewProxy.pdfView, let window = pdfView.window,
+           let editor = window.firstResponder as? NSView, editor !== pdfView, editor.isDescendant(of: pdfView) {
+            window.makeFirstResponder(pdfView)  // ends widget editing → value set
+        }
+        guard hasPendingFormEdits, !busy else { return }
+        hasPendingFormEdits = false
+        commitDocumentChange(title: "Fill Form", quiet: true)
+    }
+
+    /// A form widget's value changed in the canvas (typing, checkbox click).
+    func formFieldsEdited() {
+        guard document != nil else { return }
+        hasPendingFormEdits = true
+        isDirty = true
     }
 
     private func refreshHistoryState() {
         canUndo = session?.canUndo ?? false
         canRedo = session?.canRedo ?? false
         // Staged merges count as unsaved until they get a real home.
-        isDirty = (session?.isDirty ?? false) || (session != nil && isStagedMergeDocument)
+        isDirty = (session?.isDirty ?? false) || (session != nil && isStagedMergeDocument) || hasPendingFormEdits
         DispatchQueue.main.async { [weak self] in
             self?.prefetchBlocksForVisiblePage()
         }

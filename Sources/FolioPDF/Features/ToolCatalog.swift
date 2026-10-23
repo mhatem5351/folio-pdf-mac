@@ -82,7 +82,7 @@ enum ToolID: String, CaseIterable, Identifiable {
         case .compress: "Shrink images and clean up the file"
         case .bookmarks: "Add, rename, reorder, and remove the outline"
         case .images: "Replace, move, resize, extract, or delete images"
-        case .forms: "Create and edit fillable fields"
+        case .forms: "Auto-detect, create and edit fillable fields"
         case .watermark: "Stamp text or an image behind or over pages"
         case .headerFooter: "Add running headers, footers, and page numbers"
         case .bates: "Legal-style sequential page identifiers"

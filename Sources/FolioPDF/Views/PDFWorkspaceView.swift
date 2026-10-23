@@ -108,6 +108,9 @@ struct PDFWorkspaceView: View {
                         },
                         onAnnotationEdited: { title in
                             store.annotationEdited(title: title)
+                        },
+                        onFormEdited: {
+                            store.formFieldsEdited()
                         }
                     )
                 }

@@ -344,6 +344,23 @@ def main() -> int:
     else:
         assert len(sugg) == 2, sugg
 
+    # Labels drawn as their own text run, a footer rule with a caption under
+    # it, and white-on-white whiteout boxes (left by in-place edits).
+    mixed = OUT / "mixed_form.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_text((56, 150), "Full name:", fontsize=11)
+    page.insert_text((150, 150), "_" * 40, fontsize=11)
+    page.insert_text((56, 200), "Signature:", fontsize=11)
+    page.insert_text((140, 200), "_" * 30, fontsize=11)
+    page.draw_line((56, 792), (539, 792), color=(0.8, 0.8, 0.8), width=0.6)
+    page.insert_text((56, 808), "example.com - Confidential draft", fontsize=8)
+    page.draw_rect(pymupdf.Rect(170, 300, 540, 313), color=(1, 1, 1), fill=(1, 1, 1))
+    page.insert_text((300, 340), "Paragraph after an edited block", fontsize=11)
+    doc.save(str(mixed))
+    sugg = engine("detect-fields", "--input", str(mixed))["suggestions"]
+    assert [(s["name_hint"], s["type"]) for s in sugg] == [("Full name", "text"), ("Signature", "signature")], sugg
+
     print("forms ok")
     return 0
 

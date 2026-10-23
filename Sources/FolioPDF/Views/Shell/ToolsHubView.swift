@@ -207,6 +207,21 @@ struct CommandPaletteView: View {
                         }
                     }
                     .padding(Theme.Spacing.s)
+                    if results.isEmpty {
+                        VStack(spacing: Theme.Spacing.s) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 22, weight: .medium))
+                                .foregroundStyle(Theme.textTertiary)
+                            Text("No commands match \u{201C}\(query)\u{201D}")
+                                .font(Theme.Font.body.weight(.medium))
+                                .foregroundStyle(Theme.textSecondary)
+                            Text("Try a tool name such as OCR, watermark, split or protect.")
+                                .font(Theme.Font.caption)
+                                .foregroundStyle(Theme.textTertiary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 90)
+                    }
                 }
                 .onChange(of: highlighted) { _, index in
                     if results.indices.contains(index) { proxy.scrollTo(results[index].id) }

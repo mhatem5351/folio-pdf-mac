@@ -55,6 +55,7 @@ struct PDFPreviewView: NSViewRepresentable {
     let onRedlineCaret: (Int, Double, Double) -> Void
     let onNoteSelection: (PDFSelection) -> Void
     let onAnnotationEdited: (String) -> Void
+    var onFormEdited: () -> Void = {}
 
     final class Coordinator {
         var selectedText: Binding<String>
@@ -888,6 +889,11 @@ struct PDFPreviewView: NSViewRepresentable {
         private var lastSyncedBlockKey: String?
         /// Live only while a text editor is open (see startEscapeMonitor).
         private var escapeMonitor: Any?
+        /// Tab / Shift-Tab between form text fields (see handleFormTab).
+        private var formTabMonitor: Any?
+        /// A form widget's value changed in place (typed text, checkbox).
+        var onFormEdited: (() -> Void)?
+        private var formObservers: [NSObjectProtocol] = []
 
         deinit {
             for observer in scrollObservers {
@@ -896,6 +902,108 @@ struct PDFPreviewView: NSViewRepresentable {
             if let escapeMonitor {
                 NSEvent.removeMonitor(escapeMonitor)
             }
+            if let formTabMonitor {
+                NSEvent.removeMonitor(formTabMonitor)
+            }
+            for observer in formObservers {
+                NotificationCenter.default.removeObserver(observer)
+            }
+        }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil, formTabMonitor == nil {
+                formTabMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                    guard let self, self.handleFormTab(event) else { return event }
+                    return nil
+                }
+                observeFormEdits()
+            } else if window == nil, let monitor = formTabMonitor {
+                NSEvent.removeMonitor(monitor)
+                formTabMonitor = nil
+            }
+        }
+
+        /// Values typed into PDFKit's widget editor (or toggled checkboxes)
+        /// only change the in-memory document; report them so the store
+        /// marks the file edited and commits them before saving.
+        private func observeFormEdits() {
+            guard formObservers.isEmpty else { return }
+            let center = NotificationCenter.default
+            formObservers.append(center.addObserver(forName: NSText.didChangeNotification, object: nil, queue: .main) { [weak self] note in
+                guard let self, let text = note.object as? NSView, text.isDescendant(of: self),
+                      !(text is BlockTextView), !(text is InlineEditTextView),
+                      self.blockEditor == nil, self.newTextEditor == nil else { return }
+                self.onFormEdited?()
+            })
+            formObservers.append(center.addObserver(forName: .PDFViewAnnotationHit, object: self, queue: .main) { [weak self] note in
+                guard let annotation = note.userInfo?["PDFAnnotationHit"] as? PDFAnnotation,
+                      annotation.type == "Widget", annotation.widgetFieldType == .button,
+                      annotation.widgetControlType != .pushButtonControl else { return }
+                self?.onFormEdited?()
+            })
+        }
+
+        /// PDFKit's widget editor isn't in the window's key-view loop, so Tab
+        /// would jump to the page field in the zoom pill. While a form text
+        /// field is being filled, Tab / Shift-Tab moves to the next / previous
+        /// text field in reading order instead (committing the current one).
+        private func handleFormTab(_ event: NSEvent) -> Bool {
+            guard event.keyCode == 48, event.window === window,
+                  !event.modifierFlags.contains(.command), !event.modifierFlags.contains(.option),
+                  blockEditor == nil, newTextEditor == nil,
+                  let window, let document,
+                  let editor = window.firstResponder as? NSView, editor !== self, editor.isDescendant(of: self)
+            else { return false }
+            let center = editor.convert(NSPoint(x: editor.bounds.midX, y: editor.bounds.midY), to: self)
+            guard let page = page(for: center, nearest: true) else { return false }
+            let pagePoint = convert(center, to: page)
+
+            var fields: [(page: PDFPage, annotation: PDFAnnotation)] = []
+            for index in 0..<document.pageCount {
+                guard let candidate = document.page(at: index) else { continue }
+                let widgets = candidate.annotations.filter {
+                    $0.type == "Widget" && $0.widgetFieldType == .text && !$0.isReadOnly
+                }
+                // Rows top to bottom (PDF y grows upward), then left to right.
+                let ordered = widgets.sorted {
+                    let rowA = ($0.bounds.maxY / 6).rounded(), rowB = ($1.bounds.maxY / 6).rounded()
+                    return rowA != rowB ? rowA > rowB : $0.bounds.minX < $1.bounds.minX
+                }
+                fields += ordered.map { (candidate, $0) }
+            }
+            guard fields.count > 1,
+                  let current = fields.firstIndex(where: {
+                      $0.page == page && $0.annotation.bounds.insetBy(dx: -3, dy: -3).contains(pagePoint)
+                  })
+            else { return false }
+            let step = event.modifierFlags.contains(.shift) ? -1 : 1
+            let next = fields[(current + step + fields.count) % fields.count]
+
+            window.makeFirstResponder(self)  // commits the field being edited
+            go(to: next.annotation.bounds, on: next.page)
+            layoutDocumentView()
+            // PDFKit has no public "begin editing this widget"; a click does
+            // it. Route it through the window (after the scroll settles) so
+            // PDFKit's own tracking sees a normal click.
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self, let window else { return }
+                let target = self.convert(NSPoint(x: next.annotation.bounds.midX, y: next.annotation.bounds.midY),
+                                          from: next.page)
+                let location = self.convert(target, to: nil)
+                func click(_ type: NSEvent.EventType) -> NSEvent? {
+                    NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                                       timestamp: ProcessInfo.processInfo.systemUptime,
+                                       windowNumber: window.windowNumber, context: nil,
+                                       eventNumber: 0, clickCount: 1, pressure: 1)
+                }
+                guard let down = click(.leftMouseDown), let up = click(.leftMouseUp) else { return }
+                // Queue the mouse-up first: PDFKit's mouse-down runs a tracking
+                // loop that only returns once it dequeues one.
+                NSApp.postEvent(up, atStart: false)
+                window.sendEvent(down)
+            }
+            return true
         }
 
         /// Chrome above the canvas (tool strip) can change height and shift
@@ -2299,6 +2407,7 @@ struct PDFPreviewView: NSViewRepresentable {
         view.onRedlineCaret = onRedlineCaret
         view.onNoteSelection = onNoteSelection
         view.onAnnotationEdited = onAnnotationEdited
+        view.onFormEdited = onFormEdited
     }
 
     private func updateSelection(_ selection: PDFSelection, pdfView: PDFView, coordinator: Coordinator) {
