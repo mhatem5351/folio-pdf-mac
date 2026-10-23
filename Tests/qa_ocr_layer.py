@@ -32,7 +32,7 @@ CSS = ("@font-face {font-family: ar; src: url('Arial.ttf');} "
        "body {font-family: ar; font-size: 22pt; color: #111;} p {margin: 0 0 14pt 0;}")
 
 ENGLISH = ["Quarterly revenue grew strongly this year.", "Invoice number 4821 is due on Monday."]
-ARABIC = ["مرحبا بكم في التقرير السنوي", "نمت الإيرادات بشكل كبير هذا العام"]
+ARABIC = ["مرحبا بكم في التقرير السنوي", "نمت الإيرادات بشكل كبير هذا العام", "رقم الفاتورة 4821 بتاريخ 2026"]
 
 failures: list[str] = []
 
@@ -123,10 +123,16 @@ def synthetic_checks() -> None:
         check(b"3 Tr" in contents, "synthetic: text uses render mode 3 (invisible)")
         pix = page.get_pixmap(dpi=40, colorspace=pymupdf.csGRAY)
         check(min(pix.samples) > 250, "synthetic: nothing visible is drawn")
-        rows = [l for b in page.get_text("rawdict")["blocks"] for l in b.get("lines", [])]
-        mixed = [l for l in rows if any("4821" in "".join(c["c"] for c in s["chars"]) for s in l["spans"])]
+        check("رقم الفاتورة 4821 من PDF Studio" in text, "synthetic: raw get_text has the mixed line in logical order")
+        # Glyph level (what the engine's editor reads): rebuilt from positions.
+        glyph_flags = pymupdf.TEXTFLAGS_RAWDICT | pymupdf.TEXT_IGNORE_ACTUALTEXT
         sys.path.insert(0, str(ROOT / "Engine"))
         from ext import _rtl_text as rt  # the engine's own logical-order helper
+
+        data = page.get_text("rawdict", flags=glyph_flags)
+        rt.prepare_glyph_chars(page, data)
+        rows = [l for b in data["blocks"] for l in b.get("lines", [])]
+        mixed = [l for l in rows if any("4821" in "".join(c["c"] for c in s["chars"]) for s in l["spans"])]
 
         logical = rt.logical_text_from_chars([c for s in mixed[0]["spans"] for c in s["chars"]]) if mixed else ""
         check(logical == "رقم الفاتورة 4821 من PDF Studio", "synthetic: mixed Arabic/digits/Latin line rebuilds logically")
@@ -220,6 +226,9 @@ def vision_checks() -> None:
         text1 = page1.get_text()
         check(bool(page1.search_for("Quarterly")) and bool(page1.search_for("Monday")), "OCR'd page: English words searchable")
         check("التقرير" in text1 and "الإيرادات" in text1, "OCR'd page: Arabic words extract")
+        flat1 = " ".join(text1.split())
+        missing = [l["text"] for l in by_page[1]["lines"] if " ".join(l["text"].split()) not in flat1]
+        check(not missing, f"OCR'd page: raw get_text has every recognized line in logical order {missing}")
         check("This page already has a real text layer." in doc[1].get_text(), "skipped page untouched")
         page3 = doc[2]
         hits = page3.search_for("Quarterly")
@@ -238,6 +247,10 @@ def vision_checks() -> None:
         found = json.loads(result.stdout)
         for term in terms:
             check(1 in found["hits"].get(term, []), f"PDFKit finds {term!r} on the OCR'd page")
+        page_text = " ".join(found["texts"][0].split())
+        arabic_rows = [l["text"] for l in by_page[1]["lines"] if any("؀" <= ch <= "ۿ" for ch in l["text"])]
+        missing = [t for t in arabic_rows if " ".join(t.split()) not in page_text]
+        check(not missing, f"PDFKit page text has every recognized Arabic line in logical order {missing}")
 
 
 def main() -> None:

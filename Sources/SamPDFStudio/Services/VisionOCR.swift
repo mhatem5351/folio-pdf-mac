@@ -220,7 +220,7 @@ enum VisionOCR {
     /// idle) spends 10–30 s loading models — macOS then keeps them cached
     /// system-wide, so later requests take milliseconds. Runs once per
     /// language set per launch; cheap when the models are already loaded.
-    static func warmUp(languages: [String] = AppStore.defaultOCRLanguageCodes) {
+    static func warmUp(languages: [String]) {
         let key = languages.joined(separator: ",")
         warmUpLock.lock()
         let isNew = warmedLanguageSets.insert(key).inserted

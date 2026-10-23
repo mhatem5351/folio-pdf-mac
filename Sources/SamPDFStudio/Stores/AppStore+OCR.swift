@@ -246,7 +246,7 @@ extension AppStore {
         guard let document else { return }
         let sample = (0..<min(3, document.pageCount)).compactMap { document.page(at: $0) }
         if sample.contains(where: { !VisionOCR.pageHasText($0) }) {
-            VisionOCR.warmUp()
+            VisionOCR.warmUp(languages: Self.defaultOCRLanguageCodes)
         }
     }
 }
