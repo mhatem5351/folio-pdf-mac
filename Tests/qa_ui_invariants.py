@@ -34,7 +34,10 @@ def assert_absent(text: str, needle: str, label: str) -> None:
 
 def main() -> int:
     app_store = read("Stores/AppStore.swift")
-    content_view = read("Views/ContentView.swift")
+    # The window chrome is split across ContentView and Views/Shell/*.
+    content_view = read("Views/ContentView.swift") + "".join(
+        f.read_text(encoding="utf-8") for f in sorted((SRC / "Views" / "Shell").glob("*.swift"))
+    )
     workspace_view = read("Views/PDFWorkspaceView.swift")
     preview_view = read("Views/PDFPreviewView.swift")
     operations = read("Models/PDFOperation.swift")

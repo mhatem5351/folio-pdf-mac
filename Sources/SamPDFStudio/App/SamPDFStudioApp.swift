@@ -183,7 +183,7 @@ private struct AppCommands: Commands {
     }
 }
 
-/// Custom "About Sam PDF Studio" panel: credits the author with clickable
+/// Custom "About PDF Studio" panel: credits the author with clickable
 /// links to his sites and states the Apache 2.0 license. The copyright line
 /// comes from Info.plist (NSHumanReadableCopyright).
 private func showAboutPanel() {
@@ -198,9 +198,9 @@ private func showAboutPanel() {
     ]
 
     let credits = NSMutableAttributedString()
-    credits.append(NSAttributedString(string: "A native macOS PDF editor.\n\n", attributes: base))
+    credits.append(NSAttributedString(string: "Edit, sign, organize, protect and print PDFs — privately, on your Mac.\n\n", attributes: base))
 
-    credits.append(NSAttributedString(string: "Created by ", attributes: base))
+    credits.append(NSAttributedString(string: "Based on Sam PDF Studio, created by ", attributes: base))
     var name = base
     name[.font] = NSFont.boldSystemFont(ofSize: 11)
     credits.append(NSAttributedString(string: "Sam Wasserman\n", attributes: name))
