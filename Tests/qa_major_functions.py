@@ -463,13 +463,10 @@ def main() -> int:
     run_engine("enhance-scan", "--input", str(scanned), "--output", str(enhanced), "--grayscale", "--denoise", "--contrast", "1.4", "--sharpness", "1.2")
     assert_file(enhanced, 1000)
 
-    rendered = TMP / "render-check"
-    pdftoppm = shutil.which("pdftoppm") or "/opt/homebrew/bin/pdftoppm"
-    render_env = os.environ.copy()
-    font_config = Path("/opt/homebrew/etc/fonts/fonts.conf")
-    if font_config.exists():
-        render_env.setdefault("FONTCONFIG_FILE", str(font_config))
-    subprocess.run([pdftoppm, "-png", "-f", "1", "-singlefile", str(merged), str(rendered)], check=True, env=render_env)
+    rendered = TMP / "render-check.png"
+    import pymupdf
+    with pymupdf.open(merged) as render_doc:
+        render_doc[0].get_pixmap(dpi=72).save(rendered)
     assert_file(TMP / "render-check.png", 1000)
 
     print(json.dumps({
