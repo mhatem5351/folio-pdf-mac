@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # The venv must live OUTSIDE iCloud-synced folders (Documents/Desktop).
 # iCloud evicts rarely-touched files ("dataless"), which makes Python imports
 # hang while macOS re-downloads them. Application Support is never synced.
-VENV_DIR="${SAMPDF_VENV_DIR:-$HOME/Library/Application Support/PDFStudio/engine-venv}"
+VENV_DIR="${FOLIO_VENV_DIR:-$HOME/Library/Application Support/FolioPDF/engine-venv}"
 
 # Prefer a modern python3 if one is on PATH, else fall back to common locations.
 DEFAULT_PYTHON="$(command -v python3.13 || command -v python3.12 || command -v python3 || true)"
@@ -34,6 +34,8 @@ fi
 
 "$VENV_DIR/bin/python3" -m pip install --upgrade pip setuptools wheel
 "$VENV_DIR/bin/python3" -m pip install -r "$ROOT_DIR/Engine/requirements.txt"
+# Drop PyMuPDF 2.0's layout/LLM extras (see Engine/requirements.txt).
+"$VENV_DIR/bin/python3" -m pip uninstall -y -q pymupdf4llm pymupdf_layout onnxruntime >/dev/null 2>&1 || true
 
 missing=()
 for bin in qpdf tesseract gs; do

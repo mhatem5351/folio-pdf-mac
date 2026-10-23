@@ -2,17 +2,17 @@
 import PackageDescription
 
 let package = Package(
-    name: "SamPDFStudio",
+    name: "FolioPDF",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "SamPDFStudio", targets: ["SamPDFStudio"])
+        .executable(name: "FolioPDF", targets: ["FolioPDF"])
     ],
     targets: [
         .executableTarget(
-            name: "SamPDFStudio",
-            path: "Sources/SamPDFStudio"
+            name: "FolioPDF",
+            path: "Sources/FolioPDF"
         )
     ]
 )

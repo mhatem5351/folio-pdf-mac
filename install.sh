@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
-# Sam PDF Studio macOS installer
+# Folio PDF installer for macOS (Apple Silicon).
 #
-# Downloads the latest release and installs it to /Applications, bypassing
-# the Gatekeeper "app is damaged" false alarm that macOS shows for
-# browser-downloaded unsigned apps (terminal downloads aren't quarantined).
+# Downloads the latest release DMG and installs "Folio PDF.app" into
+# /Applications (or ~/Applications). Files fetched by curl are not
+# quarantined, so the unsigned app opens without the Gatekeeper prompt.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/wassermanproductions/sam-pdf-studio/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/mhatem5351/folio-pdf-mac/main/install.sh | bash
 set -euo pipefail
 
-REPO="wassermanproductions/sam-pdf-studio"
+REPO="mhatem5351/folio-pdf-mac"
+APP="Folio PDF.app"
 
 if [ "$(uname -m)" != "arm64" ]; then
-  echo "Sam PDF Studio currently ships for Apple Silicon (M1–M4) only." >&2
-  echo "On Intel Macs, build from source — see the README." >&2
+  echo "Folio PDF release builds are for Apple Silicon (M1 or newer)." >&2
+  echo "On an Intel Mac, build from source: https://github.com/$REPO#build-from-source" >&2
   exit 1
 fi
 
-echo "Finding the latest Sam PDF Studio release..."
+echo "Finding the latest Folio PDF release..."
 URL="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-  | grep -o 'https://[^"]*arm64\.dmg' | head -1)"
+  | grep -o 'https://[^"]*FolioPDF-[^"]*-arm64\.dmg' | head -1)"
 if [ -z "$URL" ]; then
-  echo "Could not find a macOS download — see https://github.com/$REPO/releases" >&2
+  echo "Could not find a download. See https://github.com/$REPO/releases" >&2
   exit 1
 fi
 
@@ -32,17 +33,31 @@ if [ ! -w "$DEST" ]; then
 fi
 
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+MNT=""
+cleanup() {
+  [ -n "$MNT" ] && hdiutil detach "$MNT" -quiet 2>/dev/null || true
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
 
-echo "Downloading Sam PDF Studio..."
-curl -fL --progress-bar "$URL" -o "$TMP/sam-pdf-studio.dmg"
+echo "Downloading $(basename "$URL")..."
+curl -fL --progress-bar "$URL" -o "$TMP/folio.dmg"
+if curl -fsSL "$URL.sha256" -o "$TMP/folio.sha256" 2>/dev/null; then
+  EXPECTED="$(awk '{print $1}' "$TMP/folio.sha256")"
+  ACTUAL="$(shasum -a 256 "$TMP/folio.dmg" | awk '{print $1}')"
+  if [ "$EXPECTED" != "$ACTUAL" ]; then
+    echo "Checksum mismatch, aborting." >&2
+    exit 1
+  fi
+  echo "Checksum verified."
+fi
 
 echo "Installing to $DEST..."
-MNT="$(hdiutil attach "$TMP/sam-pdf-studio.dmg" -nobrowse | awk -F'\t' '/\/Volumes\//{print $3; exit}')"
-rm -rf "$DEST/SamPDFStudio.app"
-ditto "$MNT/SamPDFStudio.app" "$DEST/SamPDFStudio.app"
-hdiutil detach "$MNT" -quiet
-xattr -cr "$DEST/SamPDFStudio.app" 2>/dev/null || true
+MNT="$(hdiutil attach "$TMP/folio.dmg" -nobrowse -readonly | awk -F'\t' '/\/Volumes\//{print $3; exit}')"
+pkill -x FolioPDF 2>/dev/null || true
+rm -rf "$DEST/$APP"
+ditto "$MNT/$APP" "$DEST/$APP"
+xattr -dr com.apple.quarantine "$DEST/$APP" 2>/dev/null || true
 
-echo "✓ Sam PDF Studio installed — launching."
-open "$DEST/SamPDFStudio.app"
+echo "✓ Folio PDF installed in $DEST. Launching..."
+open "$DEST/$APP"

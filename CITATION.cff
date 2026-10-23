@@ -1,21 +1,31 @@
 cff-version: 1.2.0
-message: "If you use Sam PDF Studio in your work, please cite it and credit Sam Wasserman (wassermanproductions.com), per the project's NOTICE and Section 4(d) of the Apache License 2.0."
-title: "Sam PDF Studio"
-abstract: "A native macOS PDF editor: edit text in place with matching font and style, move and reflow paragraphs, drop in new text anywhere, merge and rearrange pages, annotate, redline, fill and sign, and reduce, resize, number, or password-protect documents."
+message: "If you use Folio PDF in your work, please cite it. Folio PDF is based on Sam PDF Studio by Sam Wasserman (wassermanproductions.com), which must also be credited per the project's NOTICE and Section 4(d) of the Apache License 2.0."
+title: "Folio PDF"
+abstract: "A free, open-source PDF editor for macOS: edit existing text and images in place (including Arabic), reflow paragraphs, annotate, sign, create forms, organize pages, protect, OCR, compare, convert and print."
 type: software
 authors:
+  - family-names: "Hatem"
+    given-names: "Mohamed"
+    website: "https://github.com/mhatem5351"
   - family-names: "Wasserman"
     given-names: "Sam"
     website: "https://wassermanproductions.com"
-version: "1.0.0"
-date-released: "2026-07-13"
+version: "2.0.0"
 license: "Apache-2.0"
-url: "https://github.com/wassermanproductions/sam-pdf-studio"
-repository-code: "https://github.com/wassermanproductions/sam-pdf-studio"
+url: "https://github.com/mhatem5351/folio-pdf-mac"
+repository-code: "https://github.com/mhatem5351/folio-pdf-mac"
+references:
+  - type: software
+    title: "Sam PDF Studio"
+    authors:
+      - family-names: "Wasserman"
+        given-names: "Sam"
+    repository-code: "https://github.com/wassermanproductions/sam-pdf-studio"
+    license: "Apache-2.0"
 keywords:
   - pdf
   - pdf-editor
   - macos
-  - document-editing
-  - annotation
-  - fill-and-sign
+  - arabic
+  - ocr
+  - swiftui

@@ -49,12 +49,12 @@ LINES = [
     ("التاريخ ٢٠٢٦/١٠/٢٣", True),
     ("Please sign the contract مرحبا today", True),
     ("نسبة النمو 18% في عام 2025 (تقريبا)", True),
-    ("رقم الفاتورة 4821 من PDF Studio", True),
+    ("رقم الفاتورة 4821 من Folio PDF", True),
     ("مرحبا بكم في التقرير السنوي", True),
     ("مرحبا Hello World 2026 عالم", False),
 ]
 PARAGRAPH = "السطر الأول من الفقرة رقم 1\nالسطر الثاني من الفقرة 2026"
-REPLACED = "تقرير المبيعات 2026 لشركة PDF Studio بنسبة نمو ١٨٪"
+REPLACED = "تقرير المبيعات 2026 لشركة Folio PDF بنسبة نمو ١٨٪"
 MOVED = "تم الدفع بمبلغ 1,250.75 ريال"
 
 failures: list[str] = []

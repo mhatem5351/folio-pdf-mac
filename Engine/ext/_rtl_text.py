@@ -45,7 +45,7 @@ _logging.getLogger("fontTools").setLevel(_logging.ERROR)
 _RTL_RE = re.compile("[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]")
 _PRESENTATION_RE = re.compile("[\ufb50-\ufdff\ufe70-\ufefc]+")
 
-FONT_CACHE_DIR = os.path.expanduser("~/Library/Caches/PDFStudio/fonts")
+FONT_CACHE_DIR = os.path.expanduser("~/Library/Caches/FolioPDF/fonts")
 
 # Arabic-capable faces in preference order: (path, collection index, bold).
 # SF Arabic is deliberately last: it decomposes letters into a dotless body
@@ -460,7 +460,7 @@ class ShapingFont:
     @property
     def ps_name(self) -> str:
         name = self.tt["name"].getDebugName(6) or self.tt["name"].getDebugName(4) or self.label
-        return re.sub(r"[^A-Za-z0-9\-]", "", name.lstrip(".")) or "PDFStudioFont"
+        return re.sub(r"[^A-Za-z0-9\-]", "", name.lstrip(".")) or "FolioFont"
 
     def advance(self, gid: int) -> float:
         """Advance in em units, rounded the way the PDF /W array stores it."""
@@ -937,7 +937,7 @@ def prepare_glyph_chars(page: Any, data: dict[str, Any]) -> None:
 
 def mark_line_directions(data: dict[str, Any]) -> None:
     """Paragraph direction for each row containing RTL text, stored as
-    line["rtl_base"]. A row alone can be ambiguous ("PDF Studio بنسبة نمو"
+    line["rtl_base"]. A row alone can be ambiguous ("Folio PDF بنسبة نمو"
     is a wrapped Arabic sentence, yet has more Latin letters), so rows
     without a clear 2:1 majority follow the page's RTL rows overall."""
     rows = []
@@ -1126,7 +1126,7 @@ def layout_text(text: str, font: ShapingFont, size: float, max_width: float | No
     """Break `text` into lines no wider than max_width (None: no wrapping),
     honoring explicit newlines. Each paragraph takes its own direction when
     its strong letters show a clear 2:1 majority; ambiguous ones (a wrapped
-    Arabic row that happens to hold "PDF Studio") follow the whole text."""
+    Arabic row that happens to hold "Folio PDF") follow the whole text."""
     lines: list[LayoutLine] = []
     offset = 0
     overall = paragraph_is_rtl(text)
@@ -1278,7 +1278,7 @@ def _images_module() -> Any:
     import importlib.util
     import sys
 
-    name = "pdfstudio_ext_images"
+    name = "folio_ext_images"
     if name not in sys.modules:
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images.py")
         spec = importlib.util.spec_from_file_location(name, path)
@@ -1355,7 +1355,7 @@ def install_redaction_guard() -> None:
     import fitz
 
     current = fitz.Page.apply_redactions
-    if getattr(current, "_pdfstudio_guard", False):
+    if getattr(current, "_folio_guard", False):
         return
 
     def apply_redactions(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -1367,7 +1367,7 @@ def install_redaction_guard() -> None:
             strip_actual_text(self, redaction_areas(self))
         return current(self, *args, **kwargs)
 
-    apply_redactions._pdfstudio_guard = True  # type: ignore[attr-defined]
+    apply_redactions._folio_guard = True  # type: ignore[attr-defined]
     fitz.Page.apply_redactions = apply_redactions
 
 

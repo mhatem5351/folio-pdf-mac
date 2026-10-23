@@ -1,21 +1,21 @@
-# sam-pdf-studio-mcp
+# folio-pdf-mcp
 
-MCP (Model Context Protocol) stdio bridge for **[Sam PDF Studio](https://github.com/wassermanproductions/sam-pdf-studio)** — a full-featured PDF editor. This server runs Sam PDF Studio's PyMuPDF engine **headlessly**, so any MCP agent can merge, split, rotate, redact, OCR, compress, password-protect, and convert PDFs directly on file paths — no GUI, no window, no clicking.
+MCP (Model Context Protocol) stdio bridge for **[Folio PDF](https://github.com/mhatem5351/folio-pdf-mac)** — a full-featured PDF editor. This server runs Folio PDF's PyMuPDF engine **headlessly**, so any MCP agent can merge, split, rotate, redact, OCR, compress, password-protect, and convert PDFs directly on file paths — no GUI, no window, no clicking.
 
 Zero dependencies. Node ≥ 18. One file.
 
 ## What it is
 
-Sam PDF Studio ships a self-contained Python engine (`pdf_engine.py`) with its own virtual environment. This bridge is a thin wrapper that spawns that engine as a subprocess for each tool call and returns the JSON it prints. Every operation reads an **input** path and writes a **new output** path — your source files are never modified in place.
+Folio PDF ships a self-contained Python engine (`pdf_engine.py`) with its own virtual environment. This bridge is a thin wrapper that spawns that engine as a subprocess for each tool call and returns the JSON it prints. Every operation reads an **input** path and writes a **new output** path — your source files are never modified in place.
 
 ## Requirements
 
-1. **Install or build Sam PDF Studio** from the [Sam PDF Studio repo](https://github.com/wassermanproductions/sam-pdf-studio). Installing it provisions the engine virtual environment (with PyMuPDF, pypdf, pdf2docx, ocrmypdf, and the OCR/compression binaries) that this bridge drives.
+1. **Install or build Folio PDF** from the [Folio PDF repo](https://github.com/mhatem5351/folio-pdf-mac). Installing it provisions the engine virtual environment (with PyMuPDF, pypdf, pdf2docx, ocrmypdf, and the OCR/compression binaries) that this bridge drives.
 2. That's it — there is nothing to configure. The bridge auto-discovers:
-   - the engine Python at `~/Library/Application Support/SamPDFStudio/engine-venv/bin/python3`, and
+   - the engine Python at the Python bundled inside `Folio PDF.app` (or `~/Library/Application Support/FolioPDF/engine-venv/bin/python3` for source builds), and
    - the engine script `pdf_engine.py` inside the installed app (or a local build).
 
-   Override either with the `SAMPDF_ENGINE_PYTHON` and `SAMPDF_ENGINE_SCRIPT` environment variables if your install lives elsewhere. Run the `health` tool first to confirm the engine and all its dependencies are present.
+   Override either with the `FOLIO_ENGINE_PYTHON` and `FOLIO_ENGINE_SCRIPT` environment variables if your install lives elsewhere. Run the `health` tool first to confirm the engine and all its dependencies are present.
 
 ## Connect
 
@@ -25,15 +25,15 @@ Add to `~/.hermes/config.yaml` (or install from the Hermes MCP catalog once list
 
 ```yaml
 mcp_servers:
-  sam-pdf-studio:
+  folio-pdf:
     command: "node"
-    args: ["/absolute/path/to/sam-pdf-studio-mcp/sam-pdf-studio-mcp.mjs"]
+    args: ["/absolute/path/to/folio-pdf-mcp/folio-pdf-mcp.mjs"]
 ```
 
 ### Claude Code
 
 ```bash
-claude mcp add sam-pdf-studio -- node /absolute/path/to/sam-pdf-studio-mcp/sam-pdf-studio-mcp.mjs
+claude mcp add folio-pdf -- node /absolute/path/to/folio-pdf-mcp/folio-pdf-mcp.mjs
 ```
 
 ### Codex
@@ -41,15 +41,15 @@ claude mcp add sam-pdf-studio -- node /absolute/path/to/sam-pdf-studio-mcp/sam-p
 Add to `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.sam-pdf-studio]
+[mcp_servers.folio-pdf]
 command = "node"
-args = ["/absolute/path/to/sam-pdf-studio-mcp/sam-pdf-studio-mcp.mjs"]
+args = ["/absolute/path/to/folio-pdf-mcp/folio-pdf-mcp.mjs"]
 ```
 
 ### Any MCP client (generic stdio config)
 
 ```json
-{ "mcpServers": { "sam-pdf-studio": { "command": "node", "args": ["/absolute/path/to/sam-pdf-studio-mcp/sam-pdf-studio-mcp.mjs"] } } }
+{ "mcpServers": { "folio-pdf": { "command": "node", "args": ["/absolute/path/to/folio-pdf-mcp/folio-pdf-mcp.mjs"] } } }
 ```
 
 ## Tools (23)
@@ -84,8 +84,8 @@ Call `health` first to confirm the engine is ready. Every tool takes an absolute
 
 ## Security
 
-This bridge runs **only** the local, vetted Sam PDF Studio engine on **local files** you point it at. It opens no network connections, binds no ports, and passes no credentials. It spawns the engine Python resolved from your Sam PDF Studio install (or your explicit `SAMPDF_ENGINE_*` overrides) and nothing else. Output is always written to a new path, so inputs are never mutated.
+This bridge runs **only** the local, vetted Folio PDF engine on **local files** you point it at. It opens no network connections, binds no ports, and passes no credentials. It spawns the engine Python resolved from your Folio PDF install (or your explicit `FOLIO_ENGINE_*` overrides) and nothing else. Output is always written to a new path, so inputs are never mutated.
 
 ## License & credit
 
-Apache-2.0 — see [LICENSE](LICENSE). Per the [NOTICE](NOTICE) file, use, forks, and redistribution must credit **Sam Wasserman ([wassermanproductions.com](https://wassermanproductions.com))**.
+Apache-2.0 — see [LICENSE](../LICENSE). Per the [NOTICE](../NOTICE) file, use, forks, and redistribution must credit **Sam Wasserman ([wassermanproductions.com](https://wassermanproductions.com))**.

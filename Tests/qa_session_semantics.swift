@@ -1,6 +1,6 @@
 // Standalone check for DocumentSession version-stack semantics.
 // Compiled and run by script/qa.sh (XCTest is unavailable without full Xcode):
-//   swiftc Sources/SamPDFStudio/Models/DocumentSession.swift Tests/qa_session_semantics.swift -o <tmp>/qa_session && <tmp>/qa_session
+//   swiftc Sources/FolioPDF/Models/DocumentSession.swift Tests/qa_session_semantics.swift -o <tmp>/qa_session && <tmp>/qa_session
 import Foundation
 
 @main

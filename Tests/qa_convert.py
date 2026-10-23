@@ -6,7 +6,7 @@ Engine: `convert-to-pdf`, `fix-text-map` (Engine/ext/convert.py) and `compare`
 tiny harness (swiftc, Command Line Tools SDK) and exercised on Arabic RTF and
 multi-page DOCX. Fixtures are generated under tmp/qa/convert/.
 
-Run:  "$PS_PY" -W ignore Tests/qa_convert.py   -> prints "convert ok"
+Run:  "$FOLIO_PY" -W ignore Tests/qa_convert.py   -> prints "convert ok"
 """
 from __future__ import annotations
 
@@ -298,7 +298,7 @@ def build_harness() -> Path | None:
     binary = folder / "office2pdf"
     env = dict(os.environ, SDKROOT=SDK)
     proc = subprocess.run(
-        [swiftc, "-O", str(ROOT / "Sources/SamPDFStudio/Services/OfficeToPDF.swift"), str(folder / "main.swift"),
+        [swiftc, "-O", str(ROOT / "Sources/FolioPDF/Services/OfficeToPDF.swift"), str(folder / "main.swift"),
          "-o", str(binary)],
         capture_output=True, text=True, env=env,
     )

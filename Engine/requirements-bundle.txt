@@ -1,0 +1,24 @@
+# Exact, fully-resolved package set embedded in release builds
+# (script/package_release.sh installs it with --no-deps). PyMuPDF 2.0's
+# optional layout/LLM extras (onnxruntime, networkx, pymupdf4llm …) are left
+# out on purpose: the engine doesn't use them and they add ~120 MB.
+# Re-run ./script/qa.sh with the bundled Python after changing any pin.
+charset-normalizer==3.5.2
+et_xmlfile==2.0.0
+fonttools==4.67.0
+lxml==6.1.3
+markdown-it-py==4.2.0
+mdurl==0.1.2
+numpy==2.5.4
+opencv-python-headless==5.0.0.93
+openpyxl==3.1.5
+pdf2docx==0.5.13
+pillow==13.0.0
+pymupdf==2.0
+pypdf==6.21.2
+python-docx==1.2.0
+python-pptx==1.0.2
+reportlab==5.1.0
+typing_extensions==4.16.0
+uharfbuzz==0.56.4
+xlsxwriter==3.3.0

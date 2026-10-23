@@ -558,7 +558,7 @@ def register(subparsers: Any, api: Any) -> None:
             pass  # subsetting is an optimisation only
         fixed_maps = normalize_tounicode(out)
         title = args.title or inputs[0].stem
-        out.set_metadata({"title": title, "creator": "PDF Studio", "producer": f"PDF Studio engine {api.version}"})
+        out.set_metadata({"title": title, "creator": "Folio PDF", "producer": f"Folio PDF engine {api.version}"})
         out.save(str(output), garbage=3, deflate=True)
         pages = out.page_count
         out.close()

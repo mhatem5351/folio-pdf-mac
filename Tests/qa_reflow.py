@@ -44,8 +44,8 @@ AR1_LONG = (AR1 + " بفضل الاشتراكات الجديدة في منطقة
 AR2 = "هذه الفقرة الثانية يجب أن تنزل إلى الأسفل"
 EN_BELOW = "English text below the Arabic paragraphs."
 # Mixed Arabic / digits / Latin: GlyphWriter gives such lines /ActualText.
-AR_MIXED = "الفقرة الثالثة رقم 2024 من PDF Studio"
-AR_MIXED_EDIT = "الفقرة الثالثة رقم 2025 من PDF Studio الجديد"
+AR_MIXED = "الفقرة الثالثة رقم 2024 من Folio PDF"
+AR_MIXED_EDIT = "الفقرة الثالثة رقم 2025 من Folio PDF الجديد"
 
 failures: list[str] = []
 

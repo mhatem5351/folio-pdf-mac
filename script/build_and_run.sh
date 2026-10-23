@@ -2,32 +2,38 @@
 set -euo pipefail
 
 MODE="${1:-run}"
-APP_NAME="SamPDFStudio"
-BUNDLE_ID="local.pdfstudio.app"
+APP_NAME="FolioPDF"
+BUNDLE_ID="io.github.mhatem5351.FolioPDF"
 MIN_SYSTEM_VERSION="14.0"
+VERSION="${FOLIO_VERSION:-2.0.0}"
+# FOLIO_RELEASE=1 (set by script/package_release.sh): optimized build, no
+# paths from this machine in Info.plist — the engine Python is embedded later.
+RELEASE="${FOLIO_RELEASE:-0}"
+CONFIG=debug
+[[ "$RELEASE" == "1" ]] && CONFIG=release
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Build output lives OUTSIDE iCloud-synced folders — syncing an .app bundle
-# mid-write corrupts it and litters " 2" duplicates. Override with SAMPDF_DIST_DIR.
-DIST_DIR="${SAMPDF_DIST_DIR:-$HOME/Builds/SamPDFStudio}"
-APP_BUNDLE="$DIST_DIR/PDF Studio.app"
+# mid-write corrupts it and litters " 2" duplicates. Override with FOLIO_DIST_DIR.
+DIST_DIR="${FOLIO_DIST_DIR:-$HOME/Builds/FolioPDF}"
+APP_BUNDLE="$DIST_DIR/Folio PDF.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
-VENV_DIR="${SAMPDF_VENV_DIR:-$HOME/Library/Application Support/PDFStudio/engine-venv}"
+VENV_DIR="${FOLIO_VENV_DIR:-$HOME/Library/Application Support/FolioPDF/engine-venv}"
 ENGINE_PYTHON="$VENV_DIR/bin/python3"
 ENGINE_SCRIPT="$ROOT_DIR/Engine/pdf_engine.py"
 
-if [[ ! -x "$ENGINE_PYTHON" ]]; then
+if [[ "$RELEASE" != "1" && ! -x "$ENGINE_PYTHON" ]]; then
   "$ROOT_DIR/script/bootstrap_engine.sh"
 fi
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
-SCRATCH_DIR="${SAMPDF_SCRATCH_DIR:-$HOME/Library/Caches/SamPDFStudio/build}"
-swift build --scratch-path "$SCRATCH_DIR"
-BUILD_BINARY="$(swift build --scratch-path "$SCRATCH_DIR" --show-bin-path)/$APP_NAME"
+SCRATCH_DIR="${FOLIO_SCRATCH_DIR:-$HOME/Library/Caches/FolioPDF/build}"
+swift build -c "$CONFIG" --scratch-path "$SCRATCH_DIR"
+BUILD_BINARY="$(swift build -c "$CONFIG" --scratch-path "$SCRATCH_DIR" --show-bin-path)/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_CONTENTS/Resources"
@@ -46,7 +52,7 @@ cp "$ROOT_DIR"/Engine/ext/*.py "$APP_CONTENTS/Resources/ext/" 2>/dev/null || tru
 
 # Bundle the first-run engine installer + its requirements so a distributed
 # .app can self-install the Python engine on a Mac that never ran this script.
-# The app runs setup-engine.sh (with SAMPDF_ENGINE_SCRIPT/SAMPDF_REQUIREMENTS
+# The app runs setup-engine.sh (with FOLIO_ENGINE_SCRIPT/FOLIO_REQUIREMENTS
 # pointed at these Resources) the first time the venv is missing.
 cp "$ROOT_DIR/script/setup-engine.sh" "$APP_CONTENTS/Resources/setup-engine.sh"
 chmod +x "$APP_CONTENTS/Resources/setup-engine.sh"
@@ -54,6 +60,15 @@ cp "$ROOT_DIR/Engine/requirements.txt" "$APP_CONTENTS/Resources/requirements.txt
 
 # App icon (Dock, Finder, About window). CFBundleIconFile points at this.
 cp "$ROOT_DIR/Resources/AppIcon.icns" "$APP_CONTENTS/Resources/AppIcon.icns"
+
+DEV_KEYS=""
+if [[ "$RELEASE" != "1" ]]; then
+  DEV_KEYS="  <key>FolioProjectRoot</key>
+  <string>$ROOT_DIR</string>
+  <key>FolioEnginePythonPath</key>
+  <string>$ENGINE_PYTHON</string>
+"
+fi
 
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -65,11 +80,11 @@ cat >"$INFO_PLIST" <<PLIST
   <key>CFBundleIdentifier</key>
   <string>$BUNDLE_ID</string>
   <key>CFBundleName</key>
-  <string>PDF Studio</string>
+  <string>Folio PDF</string>
   <key>CFBundleShortVersionString</key>
-  <string>2.0.0</string>
+  <string>$VERSION</string>
   <key>CFBundleVersion</key>
-  <string>1.0.0</string>
+  <string>$VERSION</string>
   <key>NSHumanReadableCopyright</key>
   <string>Based on Sam PDF Studio by Sam Wasserman (Apache-2.0)</string>
   <key>CFBundleIconFile</key>
@@ -97,11 +112,7 @@ cat >"$INFO_PLIST" <<PLIST
   <true/>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
-  <key>SamPDFProjectRoot</key>
-  <string>$ROOT_DIR</string>
-  <key>SamPDFEnginePythonPath</key>
-  <string>$ENGINE_PYTHON</string>
-  <key>SamPDFBuildTime</key>
+$DEV_KEYS  <key>FolioBuildTime</key>
   <string>$(date '+%b %-d %-I:%M %p')</string>
 </dict>
 </plist>
@@ -117,14 +128,14 @@ case "$MODE" in
     ;;
   install)
     # Replace the copy in /Applications and forget the dev bundle so only one
-    # "PDF Studio" shows up in Spotlight, Launchpad and Open With.
+    # "Folio PDF" shows up in Spotlight, Launchpad and Open With.
     pkill -x "$APP_NAME" 2>/dev/null || true
-    rm -rf "/Applications/PDF Studio.app"
-    /usr/bin/ditto "$APP_BUNDLE" "/Applications/PDF Studio.app"
+    rm -rf "/Applications/Folio PDF.app"
+    /usr/bin/ditto "$APP_BUNDLE" "/Applications/Folio PDF.app"
     LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
     "$LSREGISTER" -u "$APP_BUNDLE" 2>/dev/null || true
-    "$LSREGISTER" -f "/Applications/PDF Studio.app"
-    echo "✓ installed /Applications/PDF Studio.app"
+    "$LSREGISTER" -f "/Applications/Folio PDF.app"
+    echo "✓ installed /Applications/Folio PDF.app"
     ;;
   run)
     open_app

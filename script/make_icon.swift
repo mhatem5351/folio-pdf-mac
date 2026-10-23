@@ -1,4 +1,4 @@
-// Renders the PDF Studio app icon (1024px master) → Resources/AppIcon.icns.
+// Renders the Folio PDF app icon (1024px master) → Resources/AppIcon.icns.
 // usage: swift script/make_icon.swift <out-dir>
 import AppKit
 import CoreGraphics

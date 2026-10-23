@@ -47,7 +47,7 @@ def convert_helpers() -> Any:
     global _helpers
     if _helpers is None:
         path = Path(__file__).with_name("convert.py")
-        spec = importlib.util.spec_from_file_location("pdfstudio_ext_convert_helpers", path)
+        spec = importlib.util.spec_from_file_location("folio_ext_convert_helpers", path)
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -484,7 +484,7 @@ def build_summary(info: dict[str, Any], changes: list[dict[str, Any]], width: fl
     legend += "</p>"
     html = f"""
 <html><body>
-<p class="eyebrow">PDF STUDIO · COMPARE</p>
+<p class="eyebrow">FOLIO PDF · COMPARE</p>
 <h1>Comparison Report</h1>
 <table class="files"><tr>
 <td class="file"><div class="role">ORIGINAL</div><div class="fname">{esc(info["old_name"])}</div>
@@ -736,7 +736,7 @@ def register(subparsers: Any, api: Any) -> None:
             pass
         convert_helpers().normalize_tounicode(report)
         report.set_metadata({"title": f"Comparison: {old_label} vs {new_label}",
-                             "creator": "PDF Studio", "producer": f"PDF Studio engine {api.version}"})
+                             "creator": "Folio PDF", "producer": f"Folio PDF engine {api.version}"})
         report.set_toc([[1, "Summary", 1]] + [
             [1, f"Original p.{i + 1 if i is not None else '–'} · Revised p.{j + 1 if j is not None else '–'}",
              summary_pages + r + 1]

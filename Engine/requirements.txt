@@ -1,3 +1,7 @@
+# Dev engine venv. PyMuPDF 2.0 also pulls in its optional layout/LLM extras
+# (pymupdf_layout, pymupdf4llm, onnxruntime); the setup scripts uninstall them
+# again so the dev engine matches release builds (Engine/requirements-bundle.txt)
+# and onnxruntime's exit-time telemetry flush can't hang engine processes.
 pymupdf>=1.24
 pypdf>=6.0
 pdfplumber>=0.11
@@ -5,7 +9,6 @@ reportlab>=4.0
 pillow>=10.0
 pdf2docx>=0.5.8
 ocrmypdf>=16.0
-pymupdf4llm>=0.0.24
 openpyxl>=3.1
 python-pptx>=1.0
 markdown-it-py>=3.0

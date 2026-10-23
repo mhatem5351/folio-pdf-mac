@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pymupdf
 
+pymupdf.TOOLS.unset_quad_corrections(True)  # same glyph geometry as the engine
+
 ROOT = Path(__file__).resolve().parents[1]
 ENGINE = ROOT / "Engine" / "pdf_engine.py"
 OUT = ROOT / "tmp" / "qa" / "ocr"
@@ -93,7 +95,7 @@ def synthetic_checks() -> None:
     lines = [
         {"text": "Hello searchable world", "quad": [[100, 100], [400, 100], [100, 124], [400, 124]], "confidence": 0.99},
         {"text": "مرحبا بكم في التقرير السنوي", "quad": [[150, 200], [480, 200], [150, 228], [480, 228]], "confidence": 0.97},
-        {"text": "رقم الفاتورة 4821 من PDF Studio", "rect": [120, 300, 470, 326], "confidence": 0.9},
+        {"text": "رقم الفاتورة 4821 من Folio PDF", "rect": [120, 300, 470, 326], "confidence": 0.9},
         # A slightly skewed line (rotated ~3 degrees).
         {"text": "Skewed line of text", "quad": [[100, 400], [350, 413], [99, 424], [349, 437]], "confidence": 0.8},
         {"text": "", "rect": [0, 0, 10, 10]},  # empty: skipped
@@ -123,7 +125,7 @@ def synthetic_checks() -> None:
         check(b"3 Tr" in contents, "synthetic: text uses render mode 3 (invisible)")
         pix = page.get_pixmap(dpi=40, colorspace=pymupdf.csGRAY)
         check(min(pix.samples) > 250, "synthetic: nothing visible is drawn")
-        check("رقم الفاتورة 4821 من PDF Studio" in text, "synthetic: raw get_text has the mixed line in logical order")
+        check("رقم الفاتورة 4821 من Folio PDF" in text, "synthetic: raw get_text has the mixed line in logical order")
         # Glyph level (what the engine's editor reads): rebuilt from positions.
         glyph_flags = pymupdf.TEXTFLAGS_RAWDICT | pymupdf.TEXT_IGNORE_ACTUALTEXT
         sys.path.insert(0, str(ROOT / "Engine"))
@@ -135,7 +137,7 @@ def synthetic_checks() -> None:
         mixed = [l for l in rows if any("4821" in "".join(c["c"] for c in s["chars"]) for s in l["spans"])]
 
         logical = rt.logical_text_from_chars([c for s in mixed[0]["spans"] for c in s["chars"]]) if mixed else ""
-        check(logical == "رقم الفاتورة 4821 من PDF Studio", "synthetic: mixed Arabic/digits/Latin line rebuilds logically")
+        check(logical == "رقم الفاتورة 4821 من Folio PDF", "synthetic: mixed Arabic/digits/Latin line rebuilds logically")
 
     # Bad input is rejected with a message, not a crash.
     bad = OUT / "bad.json"

@@ -144,7 +144,7 @@ def main() -> None:
     assert heading and para
 
     # --- 2. replace-block with mixed text (reflow path) ----------------------
-    mixed = "تقرير المبيعات 2026 لشركة PDF Studio بنسبة نمو ١٨٪"
+    mixed = "تقرير المبيعات 2026 لشركة Folio PDF بنسبة نمو ١٨٪"
     step1 = OUT / "step1_replace_heading.pdf"
     engine("replace-block", "--input", str(src), "--output", str(step1), "--page", "1",
            "--rect", rect_str(heading["rect"]), "--text", mixed,
@@ -154,7 +154,7 @@ def main() -> None:
     check(edited is not None and edited["line_count"] >= 2, "replace-block: longer text wraps inside one paragraph block")
     check("التقرير السنوي" not in text_in(step1), "replace-block: original heading is gone")
     plain = text_in(step1)
-    check("المبيعات" in plain and "Studio" in plain and "2026" in plain, "replace-block: PyMuPDF get_text sees the new words")
+    check("المبيعات" in plain and "Folio" in plain and "2026" in plain, "replace-block: PyMuPDF get_text sees the new words")
     with pymupdf.open(str(step1)) as doc:
         hits = doc[0].search_for("المبيعات")
     check(bool(hits) and abs(hits[0].y0 - heading["rect"][1]) < 15, "replace-block: search_for finds the Arabic word in place")
@@ -271,7 +271,7 @@ def main() -> None:
     # --- 9. PDFKit (the app's search/selection) ------------------------------
     probe = pdfkit_probe()
     if probe:
-        terms = ["المبيعات", "الأرباح", "الموافقة", "PDF Studio", "ملاحظة", "Revenue"]
+        terms = ["المبيعات", "الأرباح", "الموافقة", "Folio PDF", "ملاحظة", "Revenue"]
         result = subprocess.run([str(probe), str(step6), *terms], capture_output=True, text=True)
         data = json.loads(result.stdout)
         for term in terms:

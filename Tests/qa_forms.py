@@ -3,7 +3,7 @@
 
 Builds its own fixtures under tmp/qa/forms/, drives the engine CLI, and
 verifies results by reopening outputs with PyMuPDF (and pypdf as a second,
-independent AcroForm reader). Run: "$PS_PY" -W ignore Tests/qa_forms.py
+independent AcroForm reader). Run: "$FOLIO_PY" -W ignore Tests/qa_forms.py
 """
 from __future__ import annotations
 

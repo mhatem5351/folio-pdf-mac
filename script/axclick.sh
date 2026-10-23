@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# QA helper: click the first UI element of PDF Studio's front window whose
+# QA helper: click the first UI element of Folio PDF's front window whose
 # accessibility name/description/title equals $1 (optionally role $2, e.g. AXButton).
 osascript - "$1" "${2:-}" <<'APPLESCRIPT'
 on run argv
   set target to item 1 of argv
   set wantRole to item 2 of argv
-  tell application "System Events" to tell process "SamPDFStudio"
+  tell application "System Events" to tell process "FolioPDF"
     repeat with el in (entire contents of window 1)
       try
         set r to role of el

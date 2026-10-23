@@ -2,7 +2,7 @@
 """Deep QA campaign: diverse corpus x full operation matrix.
 
 On-demand (not part of qa.sh — takes a few minutes):
-  "$HOME/Library/Application Support/PDFStudio/engine-venv/bin/python3" Tests/qa_deep_matrix.py
+  "$HOME/Library/Application Support/FolioPDF/engine-venv/bin/python3" Tests/qa_deep_matrix.py
 
 Every operation output is re-opened and rendered to prove it is a valid,
 displayable PDF (or valid export file). Prints a PASS/FAIL matrix.
@@ -78,8 +78,8 @@ def build_corpus() -> dict[str, Path]:
     doc.save(str(p)); doc.close(); corpus["embedded-ttf"] = p
 
     # 3. Real-world invoice with obfuscated subset fonts.
-    # Point SAMPDF_REAL_INVOICE at a local PDF to include it in the matrix.
-    real_invoice = os.environ.get("SAMPDF_REAL_INVOICE")
+    # Point FOLIO_REAL_INVOICE at a local PDF to include it in the matrix.
+    real_invoice = os.environ.get("FOLIO_REAL_INVOICE")
     if real_invoice:
         src = Path(real_invoice)
         if src.exists():

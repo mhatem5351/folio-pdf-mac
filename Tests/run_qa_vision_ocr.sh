@@ -8,7 +8,7 @@ SDK="${SDKROOT:-/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk}"
 OUT_DIR="$ROOT_DIR/tmp/qa/ocr"
 BIN="$OUT_DIR/qa_vision_ocr"
 mkdir -p "$OUT_DIR"
-SRC1="$ROOT_DIR/Sources/SamPDFStudio/Services/VisionOCR.swift"
+SRC1="$ROOT_DIR/Sources/FolioPDF/Services/VisionOCR.swift"
 SRC2="$ROOT_DIR/Tests/qa_vision_ocr.swift"
 if [ ! -x "$BIN" ] || [ "$SRC1" -nt "$BIN" ] || [ "$SRC2" -nt "$BIN" ]; then
   swiftc -O -sdk "$SDK" -target "$(uname -m)-apple-macos14.0" "$SRC1" "$SRC2" -o "$BIN" >&2

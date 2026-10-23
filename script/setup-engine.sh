@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Distribution first-run bootstrap for Sam PDF Studio's Python engine.
+# Distribution first-run bootstrap for Folio PDF's Python engine.
 #
 # Runs on a fresh Mac that never saw the dev build — either from inside the
 # packaged app (Contents/Resources/setup-engine.sh) or from the repo's script/
@@ -20,12 +20,12 @@ warn() { printf '[setup-engine] WARNING: %s\n' "$*" >&2; }
 # The venv must live OUTSIDE iCloud-synced folders (Documents/Desktop). iCloud
 # evicts rarely-touched files ("dataless"), which makes Python imports hang
 # while macOS re-downloads them. Application Support is never synced.
-VENV_DIR="${SAMPDF_VENV_DIR:-$HOME/Library/Application Support/PDFStudio/engine-venv}"
+VENV_DIR="${FOLIO_VENV_DIR:-$HOME/Library/Application Support/FolioPDF/engine-venv}"
 
 # Locate the engine script + requirements. Prefer the explicit env overrides
 # (the app points these at its bundled Resources), then files sitting next to
 # this script (the .app layout), then the repo layout one directory up.
-ENGINE_SCRIPT="${SAMPDF_ENGINE_SCRIPT:-}"
+ENGINE_SCRIPT="${FOLIO_ENGINE_SCRIPT:-}"
 if [[ -z "$ENGINE_SCRIPT" ]]; then
   if [[ -f "$SELF_DIR/pdf_engine.py" ]]; then
     ENGINE_SCRIPT="$SELF_DIR/pdf_engine.py"
@@ -34,7 +34,7 @@ if [[ -z "$ENGINE_SCRIPT" ]]; then
   fi
 fi
 
-REQUIREMENTS="${SAMPDF_REQUIREMENTS:-}"
+REQUIREMENTS="${FOLIO_REQUIREMENTS:-}"
 if [[ -z "$REQUIREMENTS" ]]; then
   if [[ -f "$SELF_DIR/requirements.txt" ]]; then
     REQUIREMENTS="$SELF_DIR/requirements.txt"
@@ -109,13 +109,17 @@ fi
 
 # Tier 2 — optional packages. These power extra conversions/OCR; a failure is
 # logged but never fails the run (older Pythons or offline wheels may lack them).
-OPTIONAL_NAMES=(pdfplumber pdf2docx ocrmypdf pymupdf4llm)
+OPTIONAL_NAMES=(pdfplumber pdf2docx ocrmypdf)
 for name in "${OPTIONAL_NAMES[@]}"; do
   spec="$(req_spec "$name")"
   log "Installing optional package: $spec"
   "$VENV_PY" -m pip install "$spec" \
     || warn "Optional package skipped (not required): $spec"
 done
+
+# PyMuPDF 2.0 drags in its layout/LLM extras; drop them to match release builds
+# (onnxruntime can hang at process exit, and the engine doesn't use them).
+"$VENV_PY" -m pip uninstall -y -q pymupdf4llm pymupdf_layout onnxruntime >/dev/null 2>&1 || true
 
 # System OCR tools are OPTIONAL. Warn if absent, but never fail the run — OCR
 # features light up later once the user installs them.

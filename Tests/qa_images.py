@@ -3,7 +3,7 @@
 
 Builds fixtures under tmp/qa/images/, drives the engine CLI and checks the
 results by reopening outputs with PyMuPDF (placements, text, pixels).
-Run:  "$PS_PY" -W ignore Tests/qa_images.py
+Run:  "$FOLIO_PY" -W ignore Tests/qa_images.py
 """
 from __future__ import annotations
 

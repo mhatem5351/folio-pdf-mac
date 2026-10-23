@@ -367,11 +367,11 @@ def resolve_replacement_font(doc: Any, page: Any, style: dict[str, Any], text: s
             with os.fdopen(handle, "wb") as fh:
                 fh.write(buffer)
             scratch.append(path)
-            return {"fontname": "SamPDFEmbedded", "fontfile": path}
+            return {"fontname": "FolioEmbedded", "fontfile": path}
 
         system_path = system_font_file(raw_name, text)
         if system_path:
-            return {"fontname": "SamPDFSystem", "fontfile": system_path}
+            return {"fontname": "FolioSystem", "fontfile": system_path}
 
     return {"fontname": style["fontname"], "fontfile": None}
 
@@ -430,7 +430,7 @@ def images_module() -> Any:
     """Engine/ext/images.py (per-placement image edits), loaded on demand."""
     import importlib.util
 
-    name = "pdfstudio_ext_images"
+    name = "folio_ext_images"
     if name in sys.modules:
         return sys.modules[name]
     path = Path(__file__).resolve().parent / "ext" / "images.py"
@@ -613,7 +613,6 @@ def cmd_health(_args: argparse.Namespace) -> int:
         "pillow": import_status("pillow", "PIL"),
         "pdf2docx": import_status("pdf2docx"),
         "ocrmypdf": import_status("ocrmypdf"),
-        "pymupdf4llm": import_status("pymupdf4llm"),
         "openpyxl": import_status("openpyxl"),
         "python-pptx": import_status("python-pptx", "pptx"),
     }
@@ -623,7 +622,7 @@ def cmd_health(_args: argparse.Namespace) -> int:
         "gs": binary_status("gs", ["--version"]),
         "pdftoppm": binary_status("pdftoppm", ["-v"]),
     }
-    required = ["pymupdf", "pypdf", "pdf2docx", "ocrmypdf", "pymupdf4llm", "openpyxl", "python-pptx"]
+    required = ["pymupdf", "pypdf", "pdf2docx", "ocrmypdf", "openpyxl", "python-pptx"]
     required_bins = ["qpdf", "tesseract", "gs"]
     ok = all(packages[item]["ok"] for item in required) and all(binaries[item]["ok"] for item in required_bins)
     return respond(ok, engine=ENGINE_VERSION, python=sys.executable, packages=packages, binaries=binaries)
@@ -966,7 +965,74 @@ def page_segment_blocks(page: Any) -> list[dict[str, Any]]:
             if not text.strip():
                 continue
             blocks.append(segment)
-    return rtl_module().merge_paragraph_rows(blocks)
+    return merge_spaced_lines(rtl_module().merge_paragraph_rows(blocks))
+
+
+_BULLETS = ("•", "◦", "▪", "‣", "-", "–", "—", "*", "·")
+
+
+def _baselines(block: dict[str, Any]) -> list[float]:
+    ys = []
+    for line in block.get("lines", []):
+        origins = [span.get("origin") for span in line.get("spans", []) if span.get("origin")]
+        if origins:
+            ys.append(float(origins[0][1]))
+    return ys
+
+
+def _dominant_style(block: dict[str, Any]) -> tuple[str, float]:
+    best, area = ("", 0.0), -1.0
+    for line in block.get("lines", []):
+        for span in line.get("spans", []):
+            if not (span.get("text") or "").strip():
+                continue
+            b = span.get("bbox") or (0, 0, 0, 0)
+            a = (b[2] - b[0]) * (b[3] - b[1])
+            if a > area:
+                best, area = (span.get("font") or "", round(float(span.get("size") or 0), 1)), a
+    return best
+
+
+def merge_spaced_lines(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """MuPDF starts a new block when line spacing is generous (1.5x, double
+    spacing), so such a paragraph would edit one line at a time. Rejoin LTR
+    blocks stacked at a steady baseline pitch (<= 2.4x the font size) with the
+    same font, size and left edge. Lines stay hard breaks in the block text, so
+    joining never rewraps anything the user didn't touch."""
+    rtl = rtl_module()
+    result: list[dict[str, Any]] = []
+    for block in blocks:
+        text = "".join(line.get("text") or "" for line in block.get("lines", []))
+        ys = _baselines(block)
+        font, size = _dominant_style(block)
+        merged = False
+        if ys and size > 0 and not rtl.has_rtl(text) and not text.lstrip().startswith(_BULLETS):
+            for previous in reversed(result[-6:]):
+                p_ys = _baselines(previous)
+                if not p_ys or _dominant_style(previous) != (font, size):
+                    continue
+                if any(rtl.has_rtl(line.get("text") or "") for line in previous.get("lines", [])):
+                    continue
+                if abs(previous["bbox"][0] - block["bbox"][0]) > max(2.0, size * 0.25):
+                    continue
+                step = ys[0] - p_ys[-1]
+                if not (size * 0.9 <= step <= size * 2.4):
+                    continue
+                pitches = [b - a for a, b in zip(p_ys, p_ys[1:])] + [b - a for a, b in zip(ys, ys[1:])]
+                if any(abs(p - step) > max(1.0, size * 0.08) for p in pitches):
+                    continue
+                previous["lines"] = previous["lines"] + block["lines"]
+                previous["bbox"] = [
+                    min(previous["bbox"][0], block["bbox"][0]),
+                    min(previous["bbox"][1], block["bbox"][1]),
+                    max(previous["bbox"][2], block["bbox"][2]),
+                    max(previous["bbox"][3], block["bbox"][3]),
+                ]
+                merged = True
+                break
+        if not merged:
+            result.append(block)
+    return result
 
 
 def find_text_block(page: Any, x: float, y: float) -> dict[str, Any] | None:
@@ -1016,7 +1082,19 @@ def block_payload(block: dict[str, Any]) -> dict[str, Any]:
     bbox = block.get("bbox")
     line_height = 0.0
     if line_count > 1 and bbox:
-        line_height = (bbox[3] - bbox[1]) / line_count
+        # Baseline-to-baseline pitch. Dividing the block height by the line
+        # count undercounts it (that height holds n-1 pitches plus one line's
+        # own height), so edited paragraphs came back tighter than before.
+        baselines = []
+        for line in block.get("lines", []):
+            origins = [span.get("origin") for span in line.get("spans", []) if span.get("origin")]
+            if origins:
+                baselines.append(float(origins[0][1]))
+        steps = sorted(b - a for a, b in zip(baselines, baselines[1:]) if b - a > 0.5)
+        if steps:
+            line_height = steps[len(steps) // 2]
+        else:
+            line_height = (bbox[3] - bbox[1]) / line_count
 
     return {
         "rect": list(block.get("bbox") or ()),
@@ -1144,6 +1222,30 @@ def resolve_block_style(doc: Any, page: Any, rect: Any, args: argparse.Namespace
     return style, font_kwargs
 
 
+_PITCH_CACHE: dict[tuple, float] = {}
+
+
+def textbox_line_pitch(font_kwargs: dict[str, Any], size: float) -> float:
+    """Baseline pitch insert_textbox produces with lineheight=1 for this font."""
+    import fitz
+
+    key = (font_kwargs.get("fontname"), font_kwargs.get("fontfile"), round(size, 2))
+    if key not in _PITCH_CACHE:
+        pitch = size
+        try:
+            probe = fitz.open()
+            page = probe.new_page()
+            page.insert_textbox(fitz.Rect(10, 10, 400, 400), "Ag\nAg", fontsize=size, lineheight=1, **font_kwargs)
+            ys = [line["spans"][0]["origin"][1] for block in page.get_text("dict")["blocks"] for line in block.get("lines", [])]
+            if len(ys) >= 2 and ys[1] > ys[0]:
+                pitch = ys[1] - ys[0]
+            probe.close()
+        except Exception:
+            pass
+        _PITCH_CACHE[key] = pitch
+    return _PITCH_CACHE[key]
+
+
 def render_block_text(page: Any, origin_x: float, origin_y: float, width: float, text: str, style: dict[str, Any], font_kwargs: dict[str, Any], line_height: float, expand: float, align: int = 0, color_runs: list | None = None) -> bool:
     """Draw block text with its top-left at (origin_x, origin_y), wrapping at
     the block's width, growing toward the bottom of the page, shrinking only
@@ -1166,7 +1268,10 @@ def render_block_text(page: Any, origin_x: float, origin_y: float, width: float,
         )
     extra = {}
     if line_height and font_size > 0:
-        extra["lineheight"] = max(0.9, min(2.5, line_height / font_size))
+        # insert_textbox spaces lines by fontsize * lineheight * k with a
+        # font-dependent k (the ascender for most faces), so measure k.
+        natural = textbox_line_pitch(font_kwargs, font_size)
+        extra["lineheight"] = max(0.75, min(3.0, line_height / natural))
     size = font_size
     while size >= 6:
         result = page.insert_textbox(
@@ -2587,7 +2692,7 @@ def cmd_add_note(args: argparse.Namespace) -> int:
         return respond(False, message=f"page must be between 1 and {doc.page_count}")
     page = doc[args.page - 1]
     annot = page.add_text_annot((args.x, args.y), args.text)
-    annot.set_info(title="Sam PDF Studio", content=args.text)
+    annot.set_info(title="Folio PDF", content=args.text)
     annot.update()
     doc.save(str(output), garbage=4, deflate=True)
     doc.close()
@@ -2775,7 +2880,7 @@ def cmd_ocr(args: argparse.Namespace) -> int:
         source = fitz.open(args.input)
         if args.page < 1 or args.page > source.page_count:
             return respond(False, message=f"page must be between 1 and {source.page_count}")
-        with tempfile.TemporaryDirectory(prefix="sampdf-ocr-") as tmp_dir:
+        with tempfile.TemporaryDirectory(prefix="folio-ocr-") as tmp_dir:
             single_path = Path(tmp_dir) / "page.pdf"
             ocr_path = Path(tmp_dir) / "page-ocr.pdf"
             single = fitz.open()
@@ -2833,6 +2938,63 @@ def cmd_export_images(args: argparse.Namespace) -> int:
     return respond(True, output_dir=str(output_dir), outputs=outputs, pages=len(outputs), dpi=args.dpi, format=args.format)
 
 
+_MD_BULLETS = ("•", "◦", "▪", "‣", "–", "-", "*")
+
+
+def _markdown_run(lines: list[dict], body: float) -> str:
+    spans = [s for l in lines for s in l["spans"] if s["text"].strip()]
+    size = max(s["size"] for s in spans)
+    bold = all(s["flags"] & 16 or "bold" in s["font"].lower() for s in spans)
+    texts = [" ".join("".join(s["text"] for s in l["spans"]).replace("\u00ad", "-").split()) for l in lines]
+    joined = " ".join(texts)
+    if size >= body * 1.6:
+        return f"# {joined}"
+    if size >= body * 1.25:
+        return f"## {joined}"
+    if bold and len(joined) < 90:
+        return f"### {joined}"
+    if all(t[:1] in _MD_BULLETS and t[1:2] == " " for t in texts):
+        return "\n".join(f"- {t[2:]}" for t in texts)
+    return joined
+
+
+def pdf_to_markdown(doc: Any) -> str:
+    """Structure-aware Markdown: headings from font size, bullets, paragraphs.
+
+    The body size is the size carrying the most characters in the document;
+    lines clearly larger become headings, bold-only short lines sub-headings.
+    """
+    from collections import Counter
+
+    pages = [page.get_text("dict", sort=True)["blocks"] for page in doc]
+    weight: Counter = Counter()
+    for blocks in pages:
+        for block in blocks:
+            for line in block.get("lines", []):
+                for span in line["spans"]:
+                    weight[round(span["size"], 1)] += len(span["text"].strip())
+    body = weight.most_common(1)[0][0] if weight else 11.0
+
+    out: list[str] = []
+    for index, blocks in enumerate(pages):
+        if index:
+            out.append("---")
+        for block in blocks:
+            lines = [l for l in block.get("lines", []) if "".join(s["text"] for s in l["spans"]).strip()]
+            # Split a block where the type size changes (kicker above a title).
+            runs: list[list[dict]] = []
+            for line in lines:
+                size = round(max(s["size"] for s in line["spans"] if s["text"].strip()))
+                if runs and runs[-1][0]["_size"] == size:
+                    runs[-1].append(line)
+                else:
+                    line["_size"] = size
+                    runs.append([line])
+            for run in runs:
+                out.append(_markdown_run(run, body))
+    return "\n\n".join(out).strip() + "\n"
+
+
 def cmd_export_text(args: argparse.Namespace) -> int:
     import fitz
 
@@ -2840,17 +3002,9 @@ def cmd_export_text(args: argparse.Namespace) -> int:
     ensure_parent(output)
 
     if args.format == "md":
-        try:
-            capture = io.StringIO()
-            with silence_process_output(), contextlib.redirect_stdout(capture), contextlib.redirect_stderr(capture):
-                import pymupdf4llm
-
-                text = pymupdf4llm.to_markdown(args.input)
-        except Exception:
-            doc = fitz.open(args.input)
-            chunks = [f"# Page {i + 1}\n\n{page.get_text('text')}" for i, page in enumerate(doc)]
-            text = "\n\n".join(chunks)
-            doc.close()
+        doc = fitz.open(args.input)
+        text = pdf_to_markdown(doc)
+        doc.close()
     elif args.format == "html":
         doc = fitz.open(args.input)
         chunks = ["<!doctype html><html><head><meta charset=\"utf-8\"><title>PDF Export</title></head><body>"]
@@ -2926,7 +3080,7 @@ def cmd_export_pptx(args: argparse.Namespace) -> int:
         presentation.slide_width = Inches(10)
         presentation.slide_height = Inches(max(5.625, 10 * first.height / max(first.width, 1)))
 
-    with tempfile.TemporaryDirectory(prefix="sampdf-pptx-") as tmp_dir:
+    with tempfile.TemporaryDirectory(prefix="folio-pptx-") as tmp_dir:
         for index, page in enumerate(doc, start=1):
             pix = page.get_pixmap(matrix=fitz.Matrix(args.dpi / 72.0, args.dpi / 72.0), alpha=False)
             image_path = Path(tmp_dir) / f"page-{index:03d}.png"
@@ -2974,7 +3128,7 @@ def cmd_enhance_scan(args: argparse.Namespace) -> int:
     images = []
     matrix = fitz.Matrix(args.dpi / 72.0, args.dpi / 72.0)
 
-    with tempfile.TemporaryDirectory(prefix="sampdf-enhance-") as tmp_dir:
+    with tempfile.TemporaryDirectory(prefix="folio-enhance-") as tmp_dir:
         for index, page in enumerate(doc, start=1):
             pix = page.get_pixmap(matrix=matrix, alpha=False)
             image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
@@ -3028,7 +3182,7 @@ def load_extensions(subparsers: Any) -> None:
     for path in sorted(ext_dir.glob("*.py")):
         if path.name.startswith("_"):
             continue
-        spec = importlib.util.spec_from_file_location(f"pdfstudio_ext_{path.stem}", path)
+        spec = importlib.util.spec_from_file_location(f"folio_ext_{path.stem}", path)
         if spec is None or spec.loader is None:
             continue
         module = importlib.util.module_from_spec(spec)
@@ -3039,7 +3193,7 @@ def load_extensions(subparsers: Any) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Sam PDF Studio private PDF engine")
+    parser = argparse.ArgumentParser(description="Folio PDF engine")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     health = subparsers.add_parser("health")
@@ -3408,6 +3562,12 @@ def main() -> int:
     args = parser.parse_args()
     normalize_text_args(args)
     try:
+        # Glyph boxes without MuPDF's quad corrections, the geometry every
+        # rect heuristic here was tuned on. pymupdf4llm sets this globally on
+        # import, so set it explicitly: results must not depend on whether an
+        # optional package happens to be installed.
+        import fitz
+        fitz.TOOLS.unset_quad_corrections(True)
         # Redaction must not leave removed words in RTL lines' /ActualText.
         rtl_module().install_redaction_guard()
         return args.func(args)
