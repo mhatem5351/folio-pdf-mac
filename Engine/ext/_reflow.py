@@ -22,6 +22,11 @@ Pipeline (``replace_block_with_reflow``):
    ``Do`` operator, so a background image behind the column survives), moved
    annotations are shifted, and, inside the edit (after the block is erased,
    before the new text is drawn), the moved text spans and paths are redacted.
+   Text geometry is always read with _rtl_text.glyph_flags (real glyph
+   boxes): GlyphWriter's RTL lines otherwise report a single carrier point.
+   Redactions that remove text drop the touched lines' /ActualText (the
+   redaction guard, which also looks inside Form XObjects); line-art-only
+   redactions (text=NONE) leave it alone.
 5. The snapshot region is drawn back shifted by delta with
    ``show_pdf_page(clip=region)``: exact original fonts, glyphs, vectors and
    images. Its text lives in a Form XObject, which MuPDF extracts, searches
@@ -81,6 +86,17 @@ def _overlaps_x(rect: Any, x0: float, x1: float, tol: float = 0.5) -> bool:
     return _x_overlap(rect.x0, rect.x1, x0, x1) > tol
 
 
+def _glyph_flags(kind: str) -> int:
+    """Text flags that report REAL glyph boxes. GlyphWriter (RTL edits) puts a
+    line's logical text as /ActualText on one zero-width carrier glyph and
+    the real glyphs in an empty /ActualText span; read with the default
+    flags such a line is a single point, so its glyphs would never be
+    redacted (ghost text) or kept/stripped correctly in the snapshot."""
+    from ext import _rtl_text
+
+    return _rtl_text.glyph_flags(kind)
+
+
 def _is_white(color: Any) -> bool:
     return color is not None and len(color) >= 3 and all(c >= 0.995 for c in color[:3])
 
@@ -118,7 +134,8 @@ def collect_items(helpers: Any, page: Any, bare: Any) -> list[Item]:
             continue
         has_stroke = path.get("color") is not None and "s" in (path.get("type") or "")
         fill = path.get("fill")
-        if not has_stroke and (fill is None or _is_white(fill)):
+        stroke_shows = has_stroke and not _is_white(path.get("color"))
+        if not stroke_shows and (fill is None or _is_white(fill)):
             continue  # invisible, or a white erase box from an earlier edit
         width = float(path.get("width") or 0) if has_stroke else 0.0
         rect = fitz.Rect(path["rect"]) + (-width / 2, -width / 2, width / 2, width / 2)
@@ -272,7 +289,7 @@ def _span_rects(page: Any, inside: Any, want_inside: bool) -> list[Any]:
     import fitz
 
     rects = []
-    for block in page.get_text("rawdict").get("blocks", []):
+    for block in page.get_text("rawdict", flags=_glyph_flags("rawdict")).get("blocks", []):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
@@ -287,6 +304,15 @@ def _span_rects(page: Any, inside: Any, want_inside: bool) -> list[Any]:
                 if rect.is_empty or rect.width <= 0 or rect.height <= 0:
                     rect = fitz.Rect(center.x - 0.1, center.y - 0.1, center.x + 0.1, center.y + 0.1)
                 rects.append(rect)
+                # Narrow glyphs at the span's edge fall outside the shrunk
+                # rect: above all GlyphWriter's ActualText carrier (0.05 em
+                # wide, at the line's start edge). Left behind it would read
+                # as a stray space once its line's ActualText is dropped.
+                for ch in span.get("chars", ()):
+                    cb = fitz.Rect(ch["bbox"])
+                    mid = (cb.x0 + cb.x1) / 2
+                    if cb.width < 2.0 and not rect.x0 <= mid <= rect.x1:
+                        rects.append(fitz.Rect(cb.x0 - 0.3, rect.y0, cb.x1 + 0.3, rect.y1))
     return rects
 
 
@@ -474,7 +500,7 @@ def shift_annotations(doc: Any, xrefs: list[int], delta: float) -> int:
 
 def _line_keys(page: Any) -> list[tuple[str, tuple[float, ...]]]:
     keys = []
-    for block in page.get_text("dict").get("blocks", []):
+    for block in page.get_text("dict", flags=_glyph_flags("dict")).get("blocks", []):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):

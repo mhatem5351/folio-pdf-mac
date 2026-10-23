@@ -43,6 +43,9 @@ AR1_LONG = (AR1 + " بفضل الاشتراكات الجديدة في منطقة
             " بينما انخفض الإنفاق على التسويق بشكل ملحوظ في الربع الأخير من السنة")
 AR2 = "هذه الفقرة الثانية يجب أن تنزل إلى الأسفل"
 EN_BELOW = "English text below the Arabic paragraphs."
+# Mixed Arabic / digits / Latin: GlyphWriter gives such lines /ActualText.
+AR_MIXED = "الفقرة الثالثة رقم 2024 من PDF Studio"
+AR_MIXED_EDIT = "الفقرة الثالثة رقم 2025 من PDF Studio الجديد"
 
 failures: list[str] = []
 
@@ -203,6 +206,7 @@ def make_arabic(path: Path) -> None:
     page.insert_htmlbox(pymupdf.Rect(60, 80, 535, 110), f'<div dir="rtl">{AR1}</div>', css=css, archive=arch)
     page.insert_htmlbox(pymupdf.Rect(60, 130, 535, 160), f'<div dir="rtl">{AR2}</div>', css=css, archive=arch)
     page.insert_textbox(pymupdf.Rect(60, 180, 535, 210), EN_BELOW, fontname="tiro", fontsize=12)
+    page.insert_htmlbox(pymupdf.Rect(60, 230, 535, 260), f'<div dir="rtl">{AR_MIXED}</div>', css=css, archive=arch)
     doc.save(str(path), garbage=3, deflate=True)
 
 
@@ -385,8 +389,12 @@ def scenario_arabic() -> None:
     # insert_htmlbox stores presentation forms (not searchable by the logical
     # word); re-render the second paragraph through the engine so it carries
     # logical text like every paragraph the app has edited.
+    step = OUT / "arabic_step.pdf"
+    replace(raw, step, block_with(raw, "الفقرة"), AR2)
     src = OUT / "arabic.pdf"
-    replace(raw, src, block_with(raw, "الفقرة"), AR2)
+    replace(step, src, block_with(step, "الثالثة"), AR_MIXED)
+    check(block_with(src, "الثالثة")["text"] == AR_MIXED and AR_MIXED in page_text(src),
+          "arabic fixture: mixed line extracts logically")
     with pymupdf.open(str(src)) as d:
         # Shaped glyphs come back as one rect per glyph cluster.
         word_hits = d[0].search_for("الثانية")
@@ -411,6 +419,28 @@ def scenario_arabic() -> None:
         check(len(moved_hits) == len(word_hits) and all(abs(b.y0 - a.y0 - delta) < 0.1 and abs(b.x0 - a.x0) < 0.1
                                                         for a, b in zip(word_hits, moved_hits)),
               "arabic grow: search finds the moved Arabic word at its new place")
+
+    # The mixed line now lives inside the reflow's form XObject: its
+    # /ActualText must survive the move and be dropped when it is edited.
+    mixed = block_with(out, "الثالثة")
+    check(mixed["text"] == AR_MIXED, "arabic grow: moved mixed line extracts logically (page-blocks)")
+    check(AR_MIXED in page_text(out) and page_text(out).count("الثالثة") == 1,
+          "arabic grow: moved mixed line extracts logically once (get_text, ActualText kept)")
+    check(abs(mixed["rect"][1] - block_with(src, "الثالثة")["rect"][1] - delta) < 0.1,
+          "arabic grow: mixed line moved by delta")
+    reedit = OUT / "arabic_reedit.pdf"
+    replace(out, reedit, mixed, AR_MIXED_EDIT, "--reflow")
+    text = page_text(reedit)
+    check(AR_MIXED_EDIT in text and "2024" not in text and text.count("الثالثة") == 1,
+          "arabic re-edit of moved mixed line: new text only, no ghost words in extraction")
+    check(block_with(reedit, "الثالثة")["text"] == AR_MIXED_EDIT, "arabic re-edit: page-blocks shows the new text")
+    for path in (out, reedit):
+        with pymupdf.open(str(path)) as d:
+            stray = [line["bbox"] for b in d[0].get_text("dict")["blocks"] for line in b.get("lines", [])
+                     if not "".join(s["text"] for s in line["spans"]).strip()]
+        check(not stray, f"{path.name}: no stray ActualText carrier glyphs left behind {stray}")
+    check(block_with(reedit, "الفقرة الثانية")["text"] == AR2 and flat(block_with(reedit, "نمت")["text"]) == flat(AR1_LONG),
+          "arabic re-edit: the other Arabic paragraphs still extract logically")
 
 
 def main() -> None:

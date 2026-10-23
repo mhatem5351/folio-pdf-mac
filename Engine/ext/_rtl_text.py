@@ -1242,7 +1242,95 @@ def strip_actual_text(page: Any, areas: list[tuple[float, float, float, float]] 
         if new != data:
             doc.update_stream(xref, new)
             changed += 1
+
+    # GlyphWriter lines inside Form XObjects (paragraph reflow draws the
+    # moved content back through show_pdf_page, and MuPDF's redaction keeps
+    # such forms as forms). Their /PSBox is in FORM space: map it to page
+    # user space with the form's effective matrix before testing.
+    import fitz
+
+    for xref, matrix in form_spaces(page):
+        data = doc.xref_stream(xref) or b""
+        if b"/PSRtl" not in data:
+            continue
+
+        def hit_form(match: "re.Match[bytes]", matrix: Any = matrix) -> bytes:
+            if areas is None:
+                return b"/PSRtl BMC"
+            try:
+                box = fitz.Rect(*(float(v) for v in match.group(1).split())) * matrix
+            except (TypeError, ValueError):
+                return b"/PSRtl BMC"
+            for ax0, ay0, ax1, ay1 in areas:
+                if min(box.x1, ax1) >= max(box.x0, ax0) and min(box.y1, ay1) >= max(box.y0, ay0):
+                    return b"/PSRtl BMC"
+            return match.group(0)
+
+        new = _OUR_SPAN.sub(hit_form, data)
+        if new != data:
+            doc.update_stream(xref, new)
+            changed += 1
     return changed
+
+
+def _images_module() -> Any:
+    """Engine/ext/images.py (content-stream tokenizer), loaded once."""
+    import importlib.util
+    import sys
+
+    name = "pdfstudio_ext_images"
+    if name not in sys.modules:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "images.py")
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
+def form_spaces(page: Any) -> list[tuple[int, Any]]:
+    """Every Form XObject reachable from the page's content, with the matrix
+    mapping its form space to page user space (form /Matrix x CTM at the Do).
+    A form invoked several times is listed once per invocation."""
+    import fitz
+
+    doc = page.parent
+    if not page.get_xobjects():
+        return []
+    images = _images_module()
+    out: list[tuple[int, Any]] = []
+
+    def walk(data: bytes, names: dict, ctm: Any, chain: frozenset, depth: int) -> None:
+        stack: list = []
+        for op in images.iter_ops(data):
+            if op.name == b"q":
+                stack.append(fitz.Matrix(ctm))
+            elif op.name == b"Q":
+                if stack:
+                    ctm = stack.pop()
+            elif op.name == b"cm":
+                nums = [v for k, v in op.operands if k == "num"]
+                if len(nums) == 6:
+                    ctm = fitz.Matrix(*nums) * ctm
+            elif op.name == b"Do" and op.operands and op.operands[-1][0] == "name":
+                target = names.get(images._norm_name(op.operands[-1][1]))
+                if not target or target in chain or depth >= 12:
+                    continue
+                kind, sub = doc.xref_get_key(target, "Subtype")
+                if sub != "/Form":
+                    continue
+                mt, mv = doc.xref_get_key(target, "Matrix")
+                nums = images._numbers(mv) if mt == "array" else []
+                eff = (fitz.Matrix(*nums) if len(nums) == 6 else fitz.Matrix(1, 0, 0, 1, 0, 0)) * ctm
+                out.append((target, eff))
+                res = images._resources_string(doc, target, inherit=False)
+                fnames = images._xobject_names_from_resources(doc, res) if res[0] != "null" else names
+                walk(doc.xref_stream(target) or b"", fnames, eff, chain | {target}, depth + 1)
+
+    page_names = images._xobject_names_from_resources(doc, images._resources_string(doc, page.xref, inherit=True))
+    data = b"\n".join(doc.xref_stream(x) or b"" for x in page.get_contents())
+    walk(data, page_names, fitz.Matrix(1, 0, 0, 1, 0, 0), frozenset(), 0)
+    return out
 
 
 def redaction_areas(page: Any) -> list[tuple[float, float, float, float]]:
@@ -1271,7 +1359,12 @@ def install_redaction_guard() -> None:
         return
 
     def apply_redactions(self: Any, *args: Any, **kwargs: Any) -> Any:
-        strip_actual_text(self, redaction_areas(self))
+        # apply_redactions(images, graphics, text): a redaction that keeps
+        # text (text=PDF_REDACT_TEXT_NONE, e.g. reflow clearing line art)
+        # removes no glyph, so every line's ActualText stays valid.
+        text = kwargs.get("text", args[2] if len(args) > 2 else fitz.PDF_REDACT_TEXT_REMOVE)
+        if text != fitz.PDF_REDACT_TEXT_NONE:
+            strip_actual_text(self, redaction_areas(self))
         return current(self, *args, **kwargs)
 
     apply_redactions._pdfstudio_guard = True  # type: ignore[attr-defined]
