@@ -93,6 +93,12 @@ struct PDFPreviewView: NSViewRepresentable {
             string = text
             originalText = text
             configure(fontSize: fontSize, matchedFont: matchedFont, matchedColor: matchedColor)
+            syncWritingDirection()
+        }
+
+        override func didChangeText() {
+            super.didChangeText()
+            syncWritingDirection()
         }
 
         override init(frame frameRect: NSRect, textContainer container: NSTextContainer?) {
@@ -231,6 +237,7 @@ struct PDFPreviewView: NSViewRepresentable {
 
         override func didChangeText() {
             super.didChangeText()
+            syncWritingDirection()
             onGrew?()
         }
 
@@ -349,6 +356,7 @@ struct PDFPreviewView: NSViewRepresentable {
             textView.isVerticallyResizable = true
             textView.isHorizontallyResizable = false
             textView.autoresizingMask = [.width]
+            textView.syncWritingDirection()
             textView.onGrew = { [weak self] in
                 self?.growToFitText()
             }
@@ -570,11 +578,16 @@ struct PDFPreviewView: NSViewRepresentable {
         /// Text view fills the frame inside the border band. Changing its width
         /// re-wraps live (the container tracks the view's width).
         private func layoutTextView() {
+            let height = max(16, frame.height - Self.inset * 2)
             textView.frame = NSRect(
                 x: Self.inset, y: Self.inset,
                 width: max(20, frame.width - Self.inset * 2),
-                height: max(16, frame.height - Self.inset * 2)
+                height: height
             )
+            // A vertically resizable text view shrinks to its text; keep it at
+            // least the block's height so its white cover hides every original
+            // line while fewer lines are typed (no ghost text underneath).
+            textView.minSize = NSSize(width: 0, height: height)
         }
 
         /// The frame the commit must render into, or nil when never resized.

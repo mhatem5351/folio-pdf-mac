@@ -923,6 +923,8 @@ private struct TextStylePanel: View {
                     get: { store.activeBlock?.alignment ?? "left" },
                     set: { store.activeBlock?.alignment = $0 }
                 )) {
+                    Text("Auto").tag("auto")
+                        .help("Right-aligned for Arabic, left otherwise")
                     Image(systemName: "text.alignleft").tag("left")
                     Image(systemName: "text.aligncenter").tag("center")
                     Image(systemName: "text.alignright").tag("right")
@@ -1092,6 +1094,8 @@ private struct TextStylePanel: View {
                     get: { store.newTextDraft?.alignment ?? "left" },
                     set: { store.newTextDraft?.alignment = $0 }
                 )) {
+                    Text("Auto").tag("auto")
+                        .help("Right-aligned for Arabic, left otherwise")
                     Image(systemName: "text.alignleft").tag("left")
                     Image(systemName: "text.aligncenter").tag("center")
                     Image(systemName: "text.alignright").tag("right")

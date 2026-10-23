@@ -3302,9 +3302,38 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Argument names holding file-system paths: left exactly as received.
+_PATH_ARG_HINTS = ("input", "output", "path", "dir", "image", "json", "file", "font")
+
+
+def normalize_text_args(args: argparse.Namespace) -> None:
+    """NFC-normalize every text argument in place.
+
+    Arguments from the app arrive decomposed (NFD): Swift's Process passes
+    them through the file-system representation. Arabic hamza forms (إ → ا +
+    U+0655), accented Latin letters, etc. then no longer equal the composed
+    text PyMuPDF extracts, so block matching, find/replace and redaction miss
+    those lines. Paths are skipped (APFS lookups are normalization-insensitive).
+    """
+    import unicodedata
+
+    def fix(value: Any) -> Any:
+        if isinstance(value, str):
+            return unicodedata.normalize("NFC", value)
+        if isinstance(value, list):
+            return [fix(v) for v in value]
+        return value
+
+    for name, value in vars(args).items():
+        if any(hint in name for hint in _PATH_ARG_HINTS):
+            continue
+        setattr(args, name, fix(value))
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    normalize_text_args(args)
     try:
         return args.func(args)
     except Exception as exc:

@@ -206,7 +206,7 @@ final class PDFEngineClient {
         bold: Bool = false,
         italic: Bool = false,
         underline: Bool = false,
-        alignment: String = "left",
+        alignment: String = "auto",
         background: String? = nil,
         lineHeight: Double = 0,
         trackOriginal: String? = nil,
@@ -243,7 +243,7 @@ final class PDFEngineClient {
         if underline {
             args.append("--underline")
         }
-        if alignment != "left" {
+        if alignment != "auto" {
             args.append(contentsOf: ["--align", alignment])
         }
         if let background, !background.isEmpty {
@@ -376,7 +376,7 @@ final class PDFEngineClient {
         bold: Bool = false,
         italic: Bool = false,
         underline: Bool = false,
-        alignment: String = "left",
+        alignment: String = "auto",
         lineHeight: Double = 0,
         originalText: String? = nil
     ) throws -> EngineCommandResult {
@@ -408,7 +408,7 @@ final class PDFEngineClient {
         if underline {
             args.append("--underline")
         }
-        if alignment != "left" {
+        if alignment != "auto" {
             args.append(contentsOf: ["--align", alignment])
         }
         if lineHeight > 0 {
@@ -472,7 +472,7 @@ final class PDFEngineClient {
         bold: Bool = false,
         italic: Bool = false,
         underline: Bool = false,
-        alignment: String = "left"
+        alignment: String = "auto"
     ) throws -> EngineCommandResult {
         var args = [
             "add-text",
@@ -495,7 +495,7 @@ final class PDFEngineClient {
         if underline {
             args.append("--underline")
         }
-        if alignment != "left" {
+        if alignment != "auto" {
             args.append(contentsOf: ["--align", alignment])
         }
         return try run(args)
@@ -700,6 +700,7 @@ final class PDFEngineClient {
         // arguments, crashing the app. Strip them at the boundary.
         let sanitized = args.map { $0.replacingOccurrences(of: "\0", with: "") }
         process.arguments = [scriptURL.path] + sanitized
+        Self.logForQA(sanitized)
         // Run from a neutral, never-TCC-protected directory. Pointing cwd at
         // a Documents/Desktop path makes the subprocess hang on macOS
         // folder-permission checks whenever the app is re-signed.
@@ -728,10 +729,22 @@ final class PDFEngineClient {
         process.standardError = stderr
 
         try process.run()
+        // Drain both pipes while the engine runs: waiting first deadlocks as
+        // soon as a reply outgrows the pipe buffer (64 KB, e.g. page-blocks
+        // on a long document) — the engine blocks writing, we block waiting.
+        var errData = Data()
+        let errDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .utility).async {
+            errData = stderr.fileHandleForReading.readDataToEndOfFile()
+            errDone.signal()
+        }
+        let outData = stdout.fileHandleForReading.readDataToEndOfFile()
+        errDone.wait()
         process.waitUntilExit()
 
-        let out = String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let err = String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let out = String(data: outData, encoding: .utf8) ?? ""
+        let err = String(data: errData, encoding: .utf8) ?? ""
+        Self.logForQA(["=> status \(process.terminationStatus)", String(out.suffix(400)), String(err.suffix(600))])
 
         guard process.terminationStatus == 0 else {
             throw PDFEngineError.commandFailed(
@@ -743,6 +756,26 @@ final class PDFEngineClient {
         }
 
         return EngineCommandResult(stdout: out, stderr: err)
+    }
+
+    /// QA builds (PDFSTUDIO_QA=1 / PDFStudioQA default) append every engine
+    /// invocation as one JSON line to ~/Library/Logs/PDFStudio/engine.log so a
+    /// UI run can be replayed exactly from the command line.
+    private static func logForQA(_ args: [String]) {
+        guard DebugSnapshot.isEnabled,
+              let data = try? JSONSerialization.data(withJSONObject: args),
+              var line = String(data: data, encoding: .utf8) else { return }
+        line += "\n"
+        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/PDFStudio", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("engine.log")
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(Data(line.utf8))
+            try? handle.close()
+        } else {
+            try? Data(line.utf8).write(to: url)
+        }
     }
 
     // Venv lives outside iCloud-synced folders; iCloud eviction makes imports hang.

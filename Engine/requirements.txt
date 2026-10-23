@@ -9,3 +9,5 @@ pymupdf4llm>=0.0.24
 openpyxl>=3.1
 python-pptx>=1.0
 markdown-it-py>=3.0
+uharfbuzz>=0.39
+fonttools>=4.50

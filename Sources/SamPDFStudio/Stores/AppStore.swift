@@ -57,7 +57,8 @@ struct ActiveTextBlock: Equatable {
     var italic: Bool
     /// Underline the block's text (default false; true means changed).
     var underline: Bool
-    /// Text alignment: "left" (default), "center", or "right".
+    /// Text alignment: "auto" (default: right for RTL text, else left),
+    /// "left", "center", or "right".
     var alignment: String
     /// Explicit font family the user picked (nil = keep the original font).
     var fontFamily: String?
@@ -80,7 +81,7 @@ struct ActiveTextBlock: Equatable {
     var styleChanged: Bool {
         fontSize != originalFontSize || colorHex != originalColorHex
             || bold != originalBold || italic != originalItalic
-            || underline || alignment != "left"
+            || underline || alignment != "auto"
             || fontFamily != nil || backgroundHex != nil
             || !colorRuns.isEmpty
     }
@@ -109,7 +110,7 @@ struct NewTextDraft: Equatable {
     var bold: Bool = false
     var italic: Bool = false
     var underline: Bool = false
-    var alignment: String = "left"
+    var alignment: String = "auto"
 }
 
 struct PendingLink: Identifiable {
@@ -1221,7 +1222,7 @@ final class AppStore: ObservableObject {
             bold: block.bold,
             italic: block.italic,
             underline: false,
-            alignment: "left",
+            alignment: "auto",
             fontFamily: nil,
             backgroundHex: nil
         )
