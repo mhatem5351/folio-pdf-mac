@@ -194,6 +194,31 @@ final class PDFEngineClient {
         }
     }
 
+    /// The engine's "reflow text below" outcome for one replace-block.
+    /// `applied == false` carries a `reason` ("overflow", "noop",
+    /// "spans_columns", "rotated_page", "blocked", …).
+    struct ReplaceBlockReflow: Decodable, Equatable {
+        let applied: Bool
+        let reason: String?
+        /// How far the content below moved (points; positive = down).
+        let delta: Double?
+        let moved: Int?
+
+        /// Skipped because the content below would have run off the page.
+        var skippedForOverflow: Bool { !applied && reason == "overflow" }
+    }
+
+    struct ReplaceBlockResult {
+        let command: EngineCommandResult
+        /// nil when `--reflow` was not passed (or the reply had no `reflow`).
+        let reflow: ReplaceBlockReflow?
+    }
+
+    private struct ReplaceBlockReply: Decodable {
+        let reflow: ReplaceBlockReflow?
+    }
+
+    @discardableResult
     func replaceBlock(
         input: URL,
         output: URL,
@@ -215,8 +240,11 @@ final class PDFEngineClient {
         /// Box the replacement text is laid into when the user resized the
         /// editor frame (engine coords, "x0,y0,x1,y1"). Erasing still follows
         /// `rect`. Absent = render into `rect`, exactly as before.
-        renderRect: String? = nil
-    ) throws -> EngineCommandResult {
+        renderRect: String? = nil,
+        /// Move the content below the edited paragraph (same column) up or
+        /// down so it fits the paragraph's new height.
+        reflow: Bool = false
+    ) throws -> ReplaceBlockResult {
         var args = [
             "replace-block",
             "--input", input.path,
@@ -264,7 +292,14 @@ final class PDFEngineClient {
         if let renderRect, !renderRect.isEmpty {
             args.append(contentsOf: ["--render-rect", renderRect])
         }
-        return try run(args)
+        if reflow {
+            args.append("--reflow")
+        }
+        let result = try run(args)
+        // The edit itself already succeeded; an unreadable reflow report must
+        // not turn it into a failure, so decoding is best-effort.
+        let reply = try? JSONDecoder().decode(ReplaceBlockReply.self, from: Data(result.stdout.utf8))
+        return ReplaceBlockResult(command: result, reflow: reply?.reflow)
     }
 
     func blockBackground(input: URL, output: URL, page: Int, rect: String, colorHex: String) throws -> EngineCommandResult {

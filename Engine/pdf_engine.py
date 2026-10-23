@@ -405,6 +405,42 @@ def rtl_module() -> Any:
     return _rtl_text
 
 
+def reflow_module() -> Any:
+    engine_dir = str(Path(__file__).resolve().parent)
+    if engine_dir not in sys.path:
+        sys.path.insert(0, engine_dir)
+    from ext import _reflow
+
+    return _reflow
+
+
+def reflow_helpers() -> Any:
+    """Engine internals the reflow module (Engine/ext/_reflow.py) builds on."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        apply_block_edit=apply_block_edit,
+        text_dict=text_dict,
+        line_span_segments=line_span_segments,
+        images_module=images_module,
+    )
+
+
+def images_module() -> Any:
+    """Engine/ext/images.py (per-placement image edits), loaded on demand."""
+    import importlib.util
+
+    name = "pdfstudio_ext_images"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = Path(__file__).resolve().parent / "ext" / "images.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def text_has_rtl(text: str | None) -> bool:
     return bool(text) and bool(_RTL_CHARS.search(text))
 
@@ -1336,25 +1372,13 @@ def render_rtl_block_edit(doc: Any, page: Any, args: argparse.Namespace, style: 
     return True
 
 
-def cmd_replace_block(args: argparse.Namespace) -> int:
-    """Replace an entire text block: redact its area, re-render the new text
-    with the block's own style (or explicit overrides), wrapping inside the
-    original box, like an in-place block editor."""
+def apply_block_edit(doc: Any, page: Any, args: argparse.Namespace, rect: Any, scratch_files: list[str],
+                     before_render: Any = None) -> dict[str, Any]:
+    """The replace-block edit itself, on an open page: erase the block's own
+    lines, then re-render the new text. `before_render(page, info)` (reflow)
+    runs after the erase and before any new ink, with the erased block lines.
+    Returns {"inserted", "block_lines", "render_rect"}."""
     import fitz
-
-    output = Path(args.output)
-    ensure_parent(output)
-    doc = fitz.open(args.input)
-    if args.page < 1 or args.page > doc.page_count:
-        doc.close()
-        return respond(False, message=f"page must be between 1 and {doc.page_count}")
-    page = doc[args.page - 1]
-
-    rect_values = parse_rect(args.rect)
-    if rect_values is None:
-        doc.close()
-        return respond(False, message="--rect is required")
-    rect = fitz.Rect(rect_values)
 
     # The box the NEW text is laid into. Defaults to the original block rect;
     # a resized editor frame sends its own --render-rect so the replacement
@@ -1371,7 +1395,6 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
         or abs(render_rect.y0 - rect.y0) > 0.5
     )
 
-    scratch_files: list[str] = []
     new_text = args.text
     # Per-word color spans (JSON: [{"start":int,"length":int,"hex":"#rrggbb"}]).
     # Their presence forces full styled rendering (no per-line fast path).
@@ -1461,6 +1484,8 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
     else:
         page.add_redact_annot(block_erase_rect(rect), fill=(1, 1, 1))
         page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+    if before_render is not None:
+        before_render(page, {"block_lines": block_lines, "render_rect": render_rect})
 
     # Shade behind the block (drawn AFTER erasing, BEFORE text) so text
     # color and background persist together in one operation.
@@ -1513,16 +1538,51 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
         annot.set_info(title="Tracked change", content=f"Original text:\n{snippet}")
         annot.update()
 
-    doc.save(str(output), garbage=4, deflate=True)
-    doc.close()
-    for path in scratch_files:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+    return {"inserted": inserted, "block_lines": block_lines, "render_rect": render_rect}
+
+
+def cmd_replace_block(args: argparse.Namespace) -> int:
+    """Replace an entire text block: redact its area, re-render the new text
+    with the block's own style (or explicit overrides), wrapping inside the
+    original box, like an in-place block editor. With --reflow, the content
+    below it in the same column is pushed down / pulled up to fit."""
+    import fitz
+
+    output = Path(args.output)
+    ensure_parent(output)
+    doc = fitz.open(args.input)
+    if args.page < 1 or args.page > doc.page_count:
+        doc.close()
+        return respond(False, message=f"page must be between 1 and {doc.page_count}")
+    page = doc[args.page - 1]
+
+    rect_values = parse_rect(args.rect)
+    if rect_values is None:
+        doc.close()
+        return respond(False, message="--rect is required")
+    rect = fitz.Rect(rect_values)
+
+    scratch_files: list[str] = []
+    new_text = args.text
+    extra: dict[str, Any] = {}
+    try:
+        if getattr(args, "reflow", False):
+            result, extra["reflow"] = reflow_module().replace_block_with_reflow(
+                reflow_helpers(), doc, args.page - 1, args, rect, scratch_files)
+        else:
+            result = apply_block_edit(doc, page, args, rect, scratch_files)
+        inserted = result["inserted"]
+        doc.save(str(output), garbage=4, deflate=True)
+    finally:
+        doc.close()
+        for path in scratch_files:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
     if new_text.strip() and not inserted:
         return respond(False, message="replacement text did not fit")
-    return respond(True, output=str(output), inserted=inserted)
+    return respond(True, output=str(output), inserted=inserted, **extra)
 
 
 def block_lines_info(page: Any, rect: Any, segmented: bool = True) -> list[dict[str, Any]] | None:
@@ -3072,6 +3132,9 @@ def build_parser() -> argparse.ArgumentParser:
     replace_block.add_argument("--track-original")
     replace_block.add_argument("--original-text")
     replace_block.add_argument("--color-runs")
+    # Push down / pull up the content below the block (same column) when the
+    # new text needs more / fewer lines. Off by default.
+    replace_block.add_argument("--reflow", action="store_true")
     replace_block.set_defaults(func=cmd_replace_block)
 
     block_background = subparsers.add_parser("block-background")

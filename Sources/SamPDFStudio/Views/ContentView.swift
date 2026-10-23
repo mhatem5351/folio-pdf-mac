@@ -786,6 +786,8 @@ private struct TextStylePanel: View {
     @State private var dragOrigin: CGSize?
     /// Measured so the clamp knows how much panel has to stay on screen.
     @State private var panelSize: CGSize = CGSize(width: 210, height: 320)
+    /// Read by AppStore.commitBlockEdit (key AppStore.reflowBelowDefaultsKey).
+    @AppStorage("edit.reflowBelow") private var reflowBelow = true
 
     private static let swatches: [(name: String, hex: String)] = [
         ("Black", "#111111"), ("Dark Gray", "#555555"), ("Gray", "#888888"),
@@ -1010,6 +1012,15 @@ private struct TextStylePanel: View {
                         }
                     }
                 }
+
+                Toggle(isOn: $reflowBelow) {
+                    Text("Reflow text below")
+                        .font(Theme.Font.body)
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .help("Push or pull the paragraphs below when the edited text gets longer or shorter")
 
                 HStack(spacing: 6) {
                     Image(systemName: "cursorarrow.click")
