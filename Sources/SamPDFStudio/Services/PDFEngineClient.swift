@@ -818,7 +818,7 @@ final class PDFEngineClient {
     // Venv lives outside iCloud-synced folders; iCloud eviction makes imports hang.
     static var defaultVenvURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/SamPDFStudio/engine-venv")
+            .appendingPathComponent("Library/Application Support/PDFStudio/engine-venv")
     }
 
     private static func findProjectRoot() -> URL {

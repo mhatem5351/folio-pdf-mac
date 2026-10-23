@@ -2,7 +2,7 @@
 """Deep QA campaign: diverse corpus x full operation matrix.
 
 On-demand (not part of qa.sh — takes a few minutes):
-  "$HOME/Library/Application Support/SamPDFStudio/engine-venv/bin/python3" Tests/qa_deep_matrix.py
+  "$HOME/Library/Application Support/PDFStudio/engine-venv/bin/python3" Tests/qa_deep_matrix.py
 
 Every operation output is re-opened and rendered to prove it is a valid,
 displayable PDF (or valid export file). Prints a PASS/FAIL matrix.

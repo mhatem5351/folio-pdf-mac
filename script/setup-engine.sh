@@ -20,7 +20,7 @@ warn() { printf '[setup-engine] WARNING: %s\n' "$*" >&2; }
 # The venv must live OUTSIDE iCloud-synced folders (Documents/Desktop). iCloud
 # evicts rarely-touched files ("dataless"), which makes Python imports hang
 # while macOS re-downloads them. Application Support is never synced.
-VENV_DIR="${SAMPDF_VENV_DIR:-$HOME/Library/Application Support/SamPDFStudio/engine-venv}"
+VENV_DIR="${SAMPDF_VENV_DIR:-$HOME/Library/Application Support/PDFStudio/engine-venv}"
 
 # Locate the engine script + requirements. Prefer the explicit env overrides
 # (the app points these at its bundled Resources), then files sitting next to

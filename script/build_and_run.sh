@@ -15,7 +15,7 @@ APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
-VENV_DIR="${SAMPDF_VENV_DIR:-$HOME/Library/Application Support/SamPDFStudio/engine-venv}"
+VENV_DIR="${SAMPDF_VENV_DIR:-$HOME/Library/Application Support/PDFStudio/engine-venv}"
 ENGINE_PYTHON="$VENV_DIR/bin/python3"
 ENGINE_SCRIPT="$ROOT_DIR/Engine/pdf_engine.py"
 
