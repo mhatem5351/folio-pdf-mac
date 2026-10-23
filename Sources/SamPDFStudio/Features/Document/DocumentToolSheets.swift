@@ -1086,9 +1086,17 @@ private struct FlowBadges: View {
     var body: some View {
         FlowLayout(spacing: Theme.Spacing.xs) {
             ForEach(items, id: \.self) { item in
-                Badge(text: prefix + item.prefix(1).lowercased() + item.dropFirst(), tint: tint)
+                Badge(text: label(for: item), tint: tint)
             }
         }
+    }
+
+    /// "No printing" after a prefix; items stand alone as written, and
+    /// acronyms ("XMP metadata", "JavaScript") keep their capitals.
+    private func label(for item: String) -> String {
+        guard !prefix.isEmpty else { return item }
+        if let second = item.dropFirst().first, second.isUppercase { return prefix + item }
+        return prefix + item.prefix(1).lowercased() + item.dropFirst()
     }
 }
 

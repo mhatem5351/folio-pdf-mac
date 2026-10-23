@@ -346,7 +346,9 @@ struct SignatureManagerView: View {
                 .overlay(alignment: .bottom) {
                     Text("Draw your signature here")
                         .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        // The canvas is always white; `.tertiary` is near-white
+                        // in dark mode and made the hint invisible.
+                        .foregroundStyle(Color.black.opacity(0.4))
                         .padding(.bottom, 6)
                         .allowsHitTesting(false)
                         .opacity(drawController.hasInk ? 0 : 1)

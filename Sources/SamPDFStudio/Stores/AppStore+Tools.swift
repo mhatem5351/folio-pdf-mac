@@ -47,7 +47,10 @@ extension AppStore {
     /// System print dialog (all printers; the PDF ▾ menu also offers
     /// "Print on HP LaserJet").
     func printDocument() {
-        guard let document, let view = pdfViewProxy.pdfView else { return }
+        // The PDFView only exists in the canvas modes; Print from the Pages
+        // grid used to do nothing. The document prints without it.
+        guard let document else { return }
+        let window = pdfViewProxy.pdfView?.window ?? NSApp.mainWindow ?? NSApp.keyWindow
         let info = NSPrintInfo.shared
         info.horizontalPagination = .fit
         info.verticalPagination = .fit
@@ -56,7 +59,11 @@ extension AppStore {
         guard let operation = document.printOperation(for: info, scalingMode: .pageScaleToFit, autoRotate: true) else { return }
         operation.showsPrintPanel = true
         operation.showsProgressPanel = true
-        operation.runModal(for: view.window ?? NSApp.mainWindow ?? NSWindow(), delegate: nil, didRun: nil, contextInfo: nil)
+        if let window {
+            operation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
+        } else {
+            operation.run()
+        }
     }
 
     /// Spool the open document (or a page range of it) to the HP LaserJet

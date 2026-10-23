@@ -8,6 +8,7 @@ struct PagesGridView: View {
     @EnvironmentObject private var store: AppStore
     @State private var draggedIndex: Int?
     @State private var dropTarget: Int?
+    @State private var selectionAnchor: Int?
     @AppStorage("pagesGrid.thumbnailWidth") private var thumbnailWidth: Double = 170
 
     private var columns: [GridItem] {
@@ -31,7 +32,7 @@ struct PagesGridView: View {
                             openPage(index)
                         }
                         .onTapGesture {
-                            toggleSelection(index)
+                            click(index)
                         }
                         .onDrag {
                             draggedIndex = index
@@ -87,16 +88,30 @@ struct PagesGridView: View {
 
     private var selectionSummary: String {
         let count = store.selectedPageIndices.count
-        if count == 0 { return "\(store.pageCount) pages · click to select, drag to reorder" }
+        if count == 0 {
+            let pages = store.pageCount == 1 ? "1 page" : "\(store.pageCount) pages"
+            return "\(pages) · click to select, ⌘-click for more, drag to reorder"
+        }
         return "\(count) of \(store.pageCount) selected"
     }
 
-    private func toggleSelection(_ index: Int) {
-        if store.selectedPageIndices.contains(index) {
-            store.selectedPageIndices.remove(index)
+    /// Finder-style selection: a plain click selects just that page (so a
+    /// leftover selection can't silently ride along into Delete/Rotate),
+    /// ⌘-click toggles a page, ⇧-click extends from the last clicked page.
+    private func click(_ index: Int) {
+        let flags = NSApp.currentEvent?.modifierFlags ?? NSEvent.modifierFlags
+        if flags.contains(.command) {
+            if store.selectedPageIndices.contains(index) {
+                store.selectedPageIndices.remove(index)
+            } else {
+                store.selectedPageIndices.insert(index)
+            }
+        } else if flags.contains(.shift), let anchor = selectionAnchor, anchor < store.pageCount {
+            store.selectedPageIndices.formUnion(min(anchor, index)...max(anchor, index))
         } else {
-            store.selectedPageIndices.insert(index)
+            store.selectedPageIndices = store.selectedPageIndices == [index] ? [] : [index]
         }
+        selectionAnchor = index
     }
 
     private func openPage(_ index: Int) {

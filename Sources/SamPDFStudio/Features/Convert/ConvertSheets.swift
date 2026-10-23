@@ -504,7 +504,7 @@ struct ConvertToPDFSheet: View {
 
     private var fileList: some View {
         FormSection(files.count == 1 ? "1 file" : "\(files.count) files",
-                    footnote: files.count > 1 ? "Files are combined top to bottom. Use the arrows to reorder." : nil) {
+                    footnote: willCombine ? "Files are combined top to bottom. Use the arrows to reorder." : nil) {
             VStack(spacing: 0) {
                 ForEach(Array(files.enumerated()), id: \.element) { index, url in
                     FileRow(
