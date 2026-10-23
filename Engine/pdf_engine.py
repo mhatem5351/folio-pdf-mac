@@ -75,8 +75,25 @@ def search_rects(page: Any, text: str) -> list[Any]:
     for term in search_terms(text):
         rects = page.search_for(term)
         if rects:
-            return rects
+            return merge_touching_rects(rects) if text_has_rtl(term) else rects
     return []
+
+
+def merge_touching_rects(rects: list[Any]) -> list[Any]:
+    """MuPDF reports one Arabic hit as several touching pieces (it searches
+    visual runs); join pieces on the same row that touch into one rect."""
+    import fitz
+
+    merged: list[Any] = []
+    for rect in sorted((fitz.Rect(r) for r in rects), key=lambda r: (round(r.y0, 1), r.x0)):
+        if merged:
+            last = merged[-1]
+            overlap = min(last.y1, rect.y1) - max(last.y0, rect.y0)
+            if overlap > 0.5 * min(last.height, rect.height) and rect.x0 - last.x1 <= 1.5:
+                merged[-1] = last | rect
+                continue
+        merged.append(rect)
+    return merged
 
 
 def parse_rect(rect_text: str | None) -> tuple[float, float, float, float] | None:
@@ -370,6 +387,125 @@ def replacement_text_length(text: str, font_kwargs: dict[str, Any], fontsize: fl
         return font.text_length(text, fontsize=fontsize)
     except Exception:
         return len(text) * fontsize * 0.55
+
+
+# --- Right-to-left (Arabic/Hebrew) text -------------------------------------
+# Shaping, bidi and PDF emission live in Engine/ext/_rtl_text.py (skipped by
+# the extension loader); these wrappers keep the call sites below small.
+
+_RTL_CHARS = re.compile("[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]")
+
+
+def rtl_module() -> Any:
+    engine_dir = str(Path(__file__).resolve().parent)
+    if engine_dir not in sys.path:
+        sys.path.insert(0, engine_dir)
+    from ext import _rtl_text
+
+    return _rtl_text
+
+
+def text_has_rtl(text: str | None) -> bool:
+    return bool(text) and bool(_RTL_CHARS.search(text))
+
+
+def rtl_render_available() -> bool:
+    """Shaping needs uharfbuzz + fontTools (both ship in the engine venv as
+    dependencies); without them RTL text falls back to the plain path."""
+    try:
+        import fontTools  # noqa: F401
+        import uharfbuzz  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def natural_align(args: argparse.Namespace) -> bool:
+    """"auto" (the default) means the paragraph's start edge: left for LTR,
+    right for RTL. Explicit "left" stays left."""
+    return getattr(args, "align", "auto") in ("auto", "left")
+
+
+def text_dict(page: Any, clip: Any = None) -> dict[str, Any]:
+    """page.get_text("dict") with per-character data kept (rawdict) and every
+    span's "text" filled in, so RTL rows can be rebuilt in logical order."""
+    data = page.get_text("rawdict", clip=clip) if clip is not None else page.get_text("rawdict")
+    repairs = rtl_module().broken_text_repairs(page) if any(
+        entry[2] == "Type0" for entry in page.get_fonts(full=True)
+    ) else {}
+    for block in data.get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                maps = repairs.get(span.get("font") or "")
+                if maps:
+                    # Junk ToUnicode (see broken_text_repairs): real letters
+                    # from the embedded font; MuPDF's order is unreliable for
+                    # such rows, so rebuild them from glyph positions.
+                    if rtl_module().repair_span_chars(span.get("chars", []), maps):
+                        line["rtl_force_visual"] = True
+                span["text"] = "".join(ch.get("c", "") for ch in span.get("chars", []))
+    rt = rtl_module()
+    rt.merge_line_fragments(data)
+    rt.mark_line_directions(data)
+    return data
+
+
+def logical_spans_text(spans: list[dict[str, Any]], rtl_base: bool | None = None, force_visual: bool = False) -> str:
+    """Text of spans as one row: plain concatenation for LTR, the logical
+    (reading-order) string for rows containing RTL characters."""
+    text = "".join(span.get("text", "") for span in spans)
+    if not text_has_rtl(text) or not all("chars" in span for span in spans):
+        return text
+    chars = [ch for span in spans for ch in span.get("chars", [])]
+    return rtl_module().logical_text_from_chars(chars, rtl_base, force_visual)
+
+
+def rtl_font_for(doc: Any, page: Any, text: str, raw_font: str | None, bold: bool, family: str | None = None) -> Any:
+    """Font for RTL text: an explicit family (when it shapes Arabic), else the
+    document's own embedded font when it covers and shapes the text, else an
+    Arabic-capable system font matching the original family, Geeza Pro,
+    Arial, Tahoma, Times New Roman."""
+    rt = rtl_module()
+    if family:
+        font = rt.arabic_font_for(text, bold=bold, family_hint=family)
+        if font is not None:
+            return font
+    font = rt.embedded_font_for(doc, page, raw_font, text)
+    if font is not None:
+        return font
+    return rt.arabic_font_for(text, bold=bold, family_hint=raw_font)
+
+
+def rtl_colors(text: str, color_runs: list | None) -> list | None:
+    """Per-character RGB list from the editor's color runs (later runs win)."""
+    runs = color_run_rgb(color_runs or [], (0, 0, 0))
+    if not runs:
+        return None
+    colors: list = [None] * len(text)
+    for run in runs:
+        for index in range(max(0, run["start"]), min(len(text), run["start"] + run["length"])):
+            colors[index] = run["rgb"]
+    return colors
+
+
+def draw_rtl_line(page: Any, font: Any, text: str, size: float, color: Any, baseline_y: float,
+                  left: float | None = None, right: float | None = None, rtl: bool | None = None) -> Any:
+    """One unwrapped line anchored at its left OR right edge (`rtl` forces
+    the paragraph direction, e.g. from the surrounding block). Returns its rect."""
+    import fitz
+
+    rt = rtl_module()
+    lines = rt.layout_text(text, font, size, None, base_rtl=rtl)
+    writer = rt.GlyphWriter(page)
+    drawn = fitz.Rect()
+    step = size * 1.2
+    for line in lines:
+        x = (right - line.width) if right is not None else (left or 0.0)
+        writer.add_line(font, line, size, (x, baseline_y), color=color)
+        drawn |= fitz.Rect(x, baseline_y - font.ascender * size, x + line.width, baseline_y - font.descender * size)
+        baseline_y += step
+    writer.commit()
+    return drawn
 
 
 @contextlib.contextmanager
@@ -674,8 +810,14 @@ def line_span_segments(line: dict[str, Any]) -> list[dict[str, Any]]:
         segments.append(current)
 
     out: list[dict[str, Any]] = []
+    stream_order = {id(span): index for index, span in enumerate(line.get("spans", []))}
     for group in segments:
         text = "".join(s.get("text", "") for s in group)
+        if text_has_rtl(text):
+            # RTL rows: rebuild the logical string from the spans in content-
+            # stream order (x order would put the words right-to-left).
+            text = logical_spans_text(sorted(group, key=lambda s: stream_order.get(id(s), 0)), line.get("rtl_base"),
+                                      bool(line.get("rtl_force_visual")))
         if not text.strip():
             continue
         out.append({"spans": group, "text": text, "bbox": spans_bbox(group)})
@@ -761,7 +903,7 @@ def segment_blocks(block: dict[str, Any]) -> list[dict[str, Any]]:
                 max(b[3] for b in boxes),
             ],
             "lines": [
-                {"bbox": segment["bbox"], "spans": segment["spans"]}
+                {"bbox": segment["bbox"], "spans": segment["spans"], "text": segment["text"]}
                 for segment in group
             ],
         })
@@ -771,7 +913,7 @@ def segment_blocks(block: dict[str, Any]) -> list[dict[str, Any]]:
 def page_segment_blocks(page: Any) -> list[dict[str, Any]]:
     """Every real text SEGMENT on the page, in raw-block shape."""
     blocks = []
-    for block in page.get_text("dict").get("blocks", []):
+    for block in text_dict(page).get("blocks", []):
         if block.get("type") != 0:
             continue
         for segment in segment_blocks(block):
@@ -785,7 +927,7 @@ def page_segment_blocks(page: Any) -> list[dict[str, Any]]:
             if not text.strip():
                 continue
             blocks.append(segment)
-    return blocks
+    return rtl_module().merge_paragraph_rows(blocks)
 
 
 def find_text_block(page: Any, x: float, y: float) -> dict[str, Any] | None:
@@ -818,7 +960,7 @@ def block_payload(block: dict[str, Any]) -> dict[str, Any]:
     span_area = 0.0
     sizes = []
     for line in block.get("lines", []):
-        text = "".join(span.get("text", "") for span in line.get("spans", []))
+        text = line["text"] if "text" in line else "".join(span.get("text", "") for span in line.get("spans", []))
         lines.append(text)
         for span in line.get("spans", []):
             bbox = span.get("bbox")
@@ -1126,6 +1268,74 @@ def render_block_text_colored(page: Any, target: Any, origin_x: float, origin_y:
     return False
 
 
+def render_rtl_block_edit(doc: Any, page: Any, args: argparse.Namespace, style: dict[str, Any],
+                          per_line_lines: list[dict[str, Any]], new_lines: list[str], new_text: str,
+                          render_rect: Any, resized: bool, color_runs: list | None) -> bool:
+    """Draw replacement text containing Arabic/Hebrew: shaped, bidi-ordered,
+    right-aligned by default, logical text in the PDF.
+
+    `per_line_lines` (same count as new_lines) replays each line at its own
+    baseline and size, anchored at its RIGHT edge for RTL lines (left edge for
+    LTR lines) so an edited word doesn't move the rest of the paragraph.
+    Otherwise the text reflows inside render_rect with the block style."""
+    import fitz
+
+    rt = rtl_module()
+    overall_rtl = rt.paragraph_is_rtl(new_text)
+    if per_line_lines:
+        plans = []
+        for line, text_line in zip(per_line_lines, new_lines):
+            if not text_line.strip():
+                continue
+            raw = line.get("rawfont") or ""
+            font = rtl_font_for(doc, page, text_line, raw, "bold" in raw.lower())
+            if font is None:
+                plans = None
+                break
+            size = float(line["fontsize"])
+            width = sum(l.width for l in rt.layout_text(text_line, font, size, None))
+            line_rtl = rt.paragraph_direction(text_line, overall_rtl)
+            if line_rtl:
+                right = float(line["bbox"][2])
+                if right - width < page.rect.x0 + 8:
+                    plans = None
+                    break
+                plans.append((font, text_line, size, line["color"], line["origin"][1], None, right, True))
+            else:
+                left = float(line["origin"][0])
+                if left + width > page.rect.x1 - 8:
+                    plans = None
+                    break
+                plans.append((font, text_line, size, line["color"], line["origin"][1], left, None, False))
+        if plans is not None:
+            for font, text_line, size, color, baseline, left, right, line_rtl in plans:
+                draw_rtl_line(page, font, text_line, size, color, baseline, left=left, right=right, rtl=line_rtl)
+            return True
+
+    bold = bool(args.bold) or "bold" in (style.get("rawfont") or "").lower()
+    font = rtl_font_for(doc, page, new_text, style.get("rawfont"), bold, family=args.font)
+    if font is None:
+        return False
+    align = getattr(args, "align", "auto") or "auto"
+    box = fitz.Rect(render_rect)
+    if not resized and args.expand:
+        # Same headroom the LTR path adds, on the side the text grows toward.
+        grows_left = align == "right" or (align == "auto" and rt.paragraph_is_rtl(new_text))
+        if grows_left:
+            box.x0 = max(page.rect.x0 + 12, box.x0 - args.expand)
+        else:
+            box.x1 = min(page.rect.x1 - 12, box.x1 + args.expand)
+    result = rt.draw_paragraph(
+        page, box, new_text, font, float(style["fontsize"]), style["color"],
+        align=align, line_height=args.line_height, colors=rtl_colors(new_text, color_runs),
+    )
+    if result is None:
+        return False
+    if style.get("underline"):
+        draw_text_underlines(page, fitz.Rect(result["rect"]) + (-1, -1, 1, 4), style.get("color"))
+    return True
+
+
 def cmd_replace_block(args: argparse.Namespace) -> int:
     """Replace an entire text block: redact its area, re-render the new text
     with the block's own style (or explicit overrides), wrapping inside the
@@ -1186,18 +1396,21 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
     # line-by-line at each line's own origin and style — indents and
     # right-aligned amounts stay exactly where they were.
     new_lines = new_text.split("\n")
+    # Arabic/Hebrew replacement text is shaped and laid out right-to-left by
+    # render_rtl_block_edit below instead of insert_text/insert_textbox.
+    rtl_text = text_has_rtl(new_text) and rtl_render_available()
     per_line = (
         complete
         and not resized
         and not args.font_size and not args.color and not args.bold and not args.font
         and not getattr(args, "italic", False) and not getattr(args, "underline", False)
-        and getattr(args, "align", "left") == "left"
+        and natural_align(args)
         and not color_runs
         and len(new_lines) == len(block_lines)
         and all(line.get("origin") for line in block_lines)
     )
     per_line_fonts: list[dict[str, Any]] = []
-    if per_line:
+    if per_line and not rtl_text:
         font_cache: dict[str, dict[str, Any]] = {}
         for line, text_line in zip(block_lines, new_lines):
             raw = line["rawfont"] or ""
@@ -1229,8 +1442,9 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
         and len(block_lines) <= 1
         and rect.x0 > 0.55 * page.rect.width
         and 0 < len(new_text.strip()) <= 32
-        and getattr(args, "align", "left") == "left"
+        and natural_align(args)
         and not color_runs
+        and not rtl_text
     ):
         if per_line and per_line_fonts:
             measure_kwargs, measure_size = per_line_fonts[0], block_lines[0]["fontsize"]
@@ -1255,7 +1469,12 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
         page.draw_rect(fitz.Rect(render_rect) + (-2, -2, 2, 2), fill=bg, color=None, overlay=True)
 
     inserted = False
-    if per_line and new_text.strip():
+    if rtl_text and new_text.strip():
+        inserted = render_rtl_block_edit(
+            doc, page, args, style, block_lines if per_line else [], new_lines, new_text,
+            render_rect, resized, color_runs,
+        )
+    elif per_line and new_text.strip():
         inserted = True
         for line, text_line, font_choice in zip(block_lines, new_lines, per_line_fonts):
             if not text_line.strip():
@@ -1278,7 +1497,7 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
         inserted = render_block_text(
             page, origin_x, render_rect.y0, max(1.0, render_rect.x1 - origin_x), new_text,
             style, font_kwargs, args.line_height, expand,
-            align=align_constant(getattr(args, "align", "left")),
+            align=align_constant(getattr(args, "align", "auto")),
             color_runs=color_runs,
         )
 
@@ -1319,7 +1538,7 @@ def block_lines_info(page: Any, rect: Any, segmented: bool = True) -> list[dict[
 
     target = fitz.Rect(rect) + (-1, -1, 1, 1)
     lines = []
-    for block in page.get_text("dict").get("blocks", []):
+    for block in text_dict(page).get("blocks", []):
         if block.get("type") != 0:
             continue
         for line in block.get("lines", []):
@@ -1331,7 +1550,7 @@ def block_lines_info(page: Any, rect: Any, segmented: bool = True) -> list[dict[
                 pieces = [{
                     "spans": spans,
                     "bbox": bbox,
-                    "text": "".join(s["text"] for s in spans),
+                    "text": logical_spans_text(spans, line.get("rtl_base"), bool(line.get("rtl_force_visual"))),
                 }] if (spans and bbox) else []
             for piece in pieces:
                 spans, bbox = piece["spans"], piece["bbox"]
@@ -1351,6 +1570,7 @@ def block_lines_info(page: Any, rect: Any, segmented: bool = True) -> list[dict[
                     "rawfont": dominant.get("font"),
                     "fontsize": float(dominant.get("size") or 11),
                     "color": pdf_color_to_rgb(dominant.get("color")),
+                    "rtl_base": line.get("rtl_base"),
                     "sort_key": (round(bbox[1], 1), round(bbox[0], 1)),
                 })
     lines.sort(key=lambda line: line["sort_key"])
@@ -1480,13 +1700,14 @@ def cmd_move_block(args: argparse.Namespace) -> int:
         and text == original
         and not args.font_size and not args.color and not args.bold and not args.font
         and not getattr(args, "italic", False) and not getattr(args, "underline", False)
-        and getattr(args, "align", "left") == "left"
+        and natural_align(args)
         and all(line.get("origin") for line in block_lines)
     )
+    rtl_text = text_has_rtl(text) and rtl_render_available()
 
     style, font_kwargs = resolve_block_style(doc, page, rect, args, text, scratch_files)
     per_line_fonts: list[dict[str, Any]] = []
-    if pure_move:
+    if pure_move and not rtl_text:
         font_cache: dict[str, dict[str, Any]] = {}
         for line in block_lines:
             raw = line["rawfont"] or ""
@@ -1511,7 +1732,27 @@ def cmd_move_block(args: argparse.Namespace) -> int:
     dest_x = max(page.rect.x0 + 6, min(args.dest_x, page.rect.x1 - rect.width - 6))
     dest_y = max(page.rect.y0 + 6, min(args.dest_y, page.rect.y1 - 18))
 
-    if pure_move:
+    if rtl_text:
+        if pure_move:
+            # Shift each line's box: RTL lines keep their right edges aligned.
+            inserted = True
+            for line in block_lines:
+                raw = line.get("rawfont") or ""
+                font = rtl_font_for(doc, page, line["text"], raw, "bold" in raw.lower())
+                if font is None:
+                    inserted = False
+                    break
+                baseline = dest_y + (line["origin"][1] - rect.y0)
+                if rtl_module().paragraph_direction(line["text"], rtl_module().paragraph_is_rtl(text)):
+                    draw_rtl_line(page, font, line["text"], line["fontsize"], line["color"], baseline,
+                                  right=dest_x + (line["bbox"][2] - rect.x0), rtl=True)
+                else:
+                    draw_rtl_line(page, font, line["text"], line["fontsize"], line["color"], baseline,
+                                  left=dest_x + (line["origin"][0] - rect.x0), rtl=False)
+        else:
+            target = fitz.Rect(dest_x, dest_y, dest_x + rect.width, page.rect.y1 - 12)
+            inserted = render_rtl_block_edit(doc, page, args, style, [], text.split("\n"), text, target, False, None)
+    elif pure_move:
         # Translate every line to the destination, preserving per-line style
         # and exact intra-block layout (indents, baselines).
         inserted = True
@@ -1531,7 +1772,7 @@ def cmd_move_block(args: argparse.Namespace) -> int:
         inserted = render_block_text(
             page, dest_x, dest_y, rect.width, text,
             style, font_kwargs, args.line_height, args.expand,
-            align=align_constant(getattr(args, "align", "left")),
+            align=align_constant(getattr(args, "align", "auto")),
         )
 
     doc.save(str(output), garbage=4, deflate=True)
@@ -1804,6 +2045,52 @@ def cmd_redline(args: argparse.Namespace) -> int:
     return respond(True, output=str(output), kind=args.kind, marks=made)
 
 
+def replace_rtl_in_lines(doc: Any, page: Any, args: argparse.Namespace, rect_values: Any) -> int:
+    """Find/replace for Arabic/Hebrew: match against each row's LOGICAL text
+    and re-render the whole row (shaped, bidi-ordered) with the row's own
+    style. Patching a word into an RTL row would leave two separate runs
+    that PDFKit reads in the wrong order. Returns the replacements made."""
+    import fitz
+
+    lines = [line for line in (block_lines_info(page, page.rect) or []) if args.find in line["text"]]
+    if not lines:
+        return 0
+    if rect_values:
+        click = fitz.Rect(rect_values)
+        lines = [min(lines, key=lambda line: rect_proximity(click, fitz.Rect(line["bbox"])))]
+    rt = rtl_module()
+    plans = []
+    for line in lines:
+        count = 1 if rect_values else line["text"].count(args.find)
+        new_text = line["text"].replace(args.find, args.replace, count)
+        raw = (line.get("rawfont") or "") if args.match_style else ""
+        font = rtl_font_for(doc, page, new_text, raw or None, "bold" in raw.lower())
+        if font is None:
+            continue
+        size = float(line["fontsize"]) if args.match_style else float(args.font_size)
+        color = line["color"] if args.match_style else (0, 0, 0)
+        plans.append((line, new_text, font, size, color, count))
+    if not plans:
+        return 0
+    erase_lines(page, [plan[0] for plan in plans])
+    total = 0
+    for line, new_text, font, size, color, count in plans:
+        total += count
+        if not new_text.strip():
+            continue
+        bbox = fitz.Rect(line["bbox"])
+        baseline = line["origin"][1] if line.get("origin") else bbox.y1 - size * 0.22
+        base = line.get("rtl_base")
+        rtl = rt.paragraph_direction(new_text, rt.paragraph_is_rtl(new_text) if base is None else bool(base))
+        width = max(l.width for l in rt.layout_text(new_text, font, size, None, base_rtl=rtl))
+        room = (bbox.x1 - page.rect.x0 - 8) if rtl else (page.rect.x1 - 8 - bbox.x0)
+        if args.auto_size and width > room > 0:
+            size = max(6.0, size * room / width)
+        draw_rtl_line(page, font, new_text, size, color, baseline,
+                      left=None if rtl else bbox.x0, right=bbox.x1 if rtl else None, rtl=rtl)
+    return total
+
+
 def cmd_replace_text(args: argparse.Namespace) -> int:
     import fitz
 
@@ -1818,11 +2105,18 @@ def cmd_replace_text(args: argparse.Namespace) -> int:
     rect_values = parse_rect(args.rect)
     target_indexes = [args.page - 1] if args.page else list(range(doc.page_count))
     scratch_files: list[str] = []
+    rtl_mode = (text_has_rtl(args.find) or text_has_rtl(args.replace)) and rtl_render_available()
 
     for page_index in target_indexes:
         if page_index < 0 or page_index >= doc.page_count:
             return respond(False, message=f"page must be between 1 and {doc.page_count}")
         page = doc[page_index]
+        if rtl_mode:
+            replaced = replace_rtl_in_lines(doc, page, args, rect_values)
+            if replaced:
+                matches += replaced
+                inserted += replaced
+                continue
         if rect_values:
             click_rect = fitz.Rect(rect_values)
             found_rects = [nearest_search_rect(page, click_rect, args.find) or click_rect]
@@ -1855,6 +2149,33 @@ def cmd_replace_text(args: argparse.Namespace) -> int:
                 font_kwargs["fontfile"] = font_choice["fontfile"]
 
             font_size = base_font_size if args.match_style else args.font_size
+
+            if text_has_rtl(args.replace) and rtl_render_available():
+                # Arabic/Hebrew replacement: shaped and bidi-ordered; RTL text
+                # keeps the found phrase's RIGHT edge (where it starts).
+                rt = rtl_module()
+                raw = style.get("rawfont") if args.match_style else None
+                rtl_font = rtl_font_for(doc, page, args.replace, raw, "bold" in (raw or "").lower())
+                if rtl_font is None:
+                    continue
+                rtl_para = rt.paragraph_is_rtl(args.replace)
+                origin = style.get("origin")
+                if "\n" not in args.replace:
+                    width = rt.layout_text(args.replace, rtl_font, font_size, None)[0].width
+                    room = (rect.x1 - page.rect.x0 - 12) if rtl_para else (page.rect.x1 - 12 - rect.x0)
+                    if args.auto_size and width > room > 0:
+                        font_size = max(6.0, font_size * room / width)
+                    baseline_y = origin[1] if origin else rect.y1 - max(1.5, base_font_size * 0.18)
+                    draw_rtl_line(page, rtl_font, args.replace, max(font_size, 6), color, baseline_y,
+                                  left=None if rtl_para else rect.x0, right=rect.x1 if rtl_para else None)
+                else:
+                    box_width = max(rect.width + args.expand, 80)
+                    x0 = max(page.rect.x0 + 12, rect.x1 - box_width) if rtl_para else rect.x0
+                    x1 = rect.x1 if rtl_para else min(page.rect.x1 - 12, rect.x0 + box_width)
+                    rt.draw_paragraph(page, fitz.Rect(x0, rect.y0, x1, page.rect.y1 - 12), args.replace,
+                                      rtl_font, font_size, color)
+                inserted += 1
+                continue
 
             # Single-line replacements sit on the original baseline at the
             # original size; shrink only if the new text
@@ -2110,7 +2431,33 @@ def cmd_add_text(args: argparse.Namespace) -> int:
     baseline_y = args.y + args.font_size * 0.83
 
     page = doc[args.page - 1]
-    align = align_constant(getattr(args, "align", "left"))
+    align = align_constant(getattr(args, "align", "auto"))
+    if text_has_rtl(args.text) and rtl_render_available():
+        # Arabic/Hebrew: shaped, bidi-ordered glyphs with a logical ToUnicode.
+        # "auto" right-aligns RTL paragraphs inside the text's own width, so
+        # the click point stays the block's left edge either way.
+        rt = rtl_module()
+        family = None if (args.font or "").strip().lower() in ("", "helvetica") else args.font
+        font = rtl_font_for(doc, page, args.text, None, args.bold, family=family)
+        if font is None:
+            doc.close()
+            return respond(False, message="no installed font can display this text")
+        mode = getattr(args, "align", "auto")
+        natural = max((line.width for line in rt.layout_text(args.text, font, args.font_size, None)), default=0.0)
+        right_limit = page.rect.x1 - 12
+        if mode in ("center", "right") or args.x + natural > right_limit:
+            box = fitz.Rect(args.x, args.y, right_limit, page.rect.y1 - 12)
+        else:
+            box = fitz.Rect(args.x, args.y, args.x + natural + 0.5, page.rect.y1 - 12)
+        result = rt.draw_paragraph(page, box, args.text, font, args.font_size, color, align=mode)
+        if result is None:
+            doc.close()
+            return respond(False, message="text did not fit on the page")
+        if getattr(args, "underline", False):
+            draw_text_underlines(page, fitz.Rect(result["rect"]) + (-1, -1, 1, 4), color)
+        doc.save(str(output), garbage=4, deflate=True)
+        doc.close()
+        return respond(True, output=str(output), page=args.page)
     if align != fitz.TEXT_ALIGN_LEFT:
         # A box from the click x to the right margin gives center/right text
         # room to lay out; left keeps the exact baseline placement below
@@ -2718,7 +3065,7 @@ def build_parser() -> argparse.ArgumentParser:
     replace_block.add_argument("--bold", action="store_true")
     replace_block.add_argument("--italic", action="store_true")
     replace_block.add_argument("--underline", action="store_true")
-    replace_block.add_argument("--align", choices=["left", "center", "right"], default="left")
+    replace_block.add_argument("--align", choices=["auto", "left", "center", "right"], default="auto")
     replace_block.add_argument("--background", default=None)
     replace_block.add_argument("--expand", type=float, default=40)
     replace_block.add_argument("--line-height", type=float, default=0)
@@ -2750,7 +3097,7 @@ def build_parser() -> argparse.ArgumentParser:
     move_block.add_argument("--bold", action="store_true")
     move_block.add_argument("--italic", action="store_true")
     move_block.add_argument("--underline", action="store_true")
-    move_block.add_argument("--align", choices=["left", "center", "right"], default="left")
+    move_block.add_argument("--align", choices=["auto", "left", "center", "right"], default="auto")
     move_block.add_argument("--expand", type=float, default=40)
     move_block.add_argument("--line-height", type=float, default=0)
     move_block.add_argument("--original-text")
@@ -2830,7 +3177,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_text.add_argument("--bold", action="store_true")
     add_text.add_argument("--italic", action="store_true")
     add_text.add_argument("--underline", action="store_true")
-    add_text.add_argument("--align", choices=["left", "center", "right"], default="left")
+    add_text.add_argument("--align", choices=["auto", "left", "center", "right"], default="auto")
     add_text.set_defaults(func=cmd_add_text)
 
     annotate = subparsers.add_parser("annotate-text")
