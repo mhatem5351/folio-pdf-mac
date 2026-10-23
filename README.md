@@ -1,135 +1,80 @@
-<p align="center">
-  <img src="docs/images/logo.png" alt="Sam PDF Studio" width="380">
-</p>
+<p align="center"><img src="Resources/AppIcon.png" alt="PDF Studio" width="128"></p>
 
-<p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
-  <a href="../../releases/latest"><img src="https://img.shields.io/github/v/release/wassermanproductions/sam-pdf-studio?include_prereleases&label=download" alt="Latest release"></a>
-  <img src="https://img.shields.io/badge/platforms-macOS-2f7bf6" alt="Platforms">
-  <a href="https://ko-fi.com/samwasserman"><img src="https://img.shields.io/badge/Ko--fi-support%20Sam%20Wasserman-ff5e5b?logo=kofi&logoColor=white" alt="Support Sam Wasserman on Ko-fi"></a>
-</p>
+# PDF Studio
 
-# Sam PDF Studio
+A private, native macOS PDF viewer and editor: edit existing text and images in
+place (including Arabic), annotate, sign, fill and create forms, organize pages,
+protect, OCR, compare, convert — and print straight to a USB HP LaserJet.
 
-A native macOS PDF editor with a direct, tactile working feel: click the page and it happens — no coordinates, no forms, no output-folder litter. A SwiftUI/PDFKit front end drives a local PDF engine, so every document stays on your Mac.
+Everything runs locally: a SwiftUI/PDFKit app drives a Python engine
+(PyMuPDF) on your Mac. Nothing is uploaded anywhere.
 
-![Editing text in place with the Text style panel](docs/images/edit-text.png)
-
-## Download
-
-**Easiest install — paste one line into Terminal** (⌘-Space, type "Terminal")
-and it downloads the latest build, installs it to Applications, and opens it —
-no security warnings:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/wassermanproductions/sam-pdf-studio/main/install.sh | bash
-```
-
-Or **[⬇ download the latest release](https://github.com/wassermanproductions/sam-pdf-studio/releases/latest)** — a macOS app for Apple Silicon (`.dmg`). Open it and drag **Sam PDF Studio** to your Applications folder.
-
-First launch — two one-time things:
-
-1. If you downloaded the `.dmg` in a browser (rather than using the one-line installer), the app isn't Apple-notarized yet, so macOS falsely claims it "is damaged." It isn't — paste this into Terminal once and it opens normally from then on:
-   ```bash
-   xattr -cr "/Applications/SamPDFStudio.app"
-   ```
-2. On first launch it **sets up its PDF engine automatically** (a one-time install that needs an internet connection and takes a minute or two). Core editing works right after; for **OCR / searchable scans**, also install the system tools once with [Homebrew](https://brew.sh): `brew install qpdf tesseract ghostscript poppler`.
-
-Prefer to build from source instead? See **[Build & run](#build--run)** below.
+Based on [Sam PDF Studio](https://github.com/wassermanproductions/sam-pdf-studio)
+by Sam Wasserman (Apache-2.0) — see [NOTICE](NOTICE).
 
 ## Features
 
-- **Edit text in place** — click a paragraph and it becomes a live box you type into: multi-line, matching the document's own font, size, and color. Change the font to **any family in your font library**, adjust size, and set **bold**, *italic*, underline, and alignment (left / center / right), plus text color and a highlight/background color. Drag the box's dashed frame to move the whole block — alignment guides snap the moved content's bottom edge onto the line below, so it lands exactly where you drop it.
-- **Annotate** — drag across text to highlight, underline, or strike through instantly, in any of eight colors (now including white, grey, and black). Drop sticky notes, type a text box anywhere on the page, or stamp a signature.
+| Area | What you can do |
+|---|---|
+| **Edit** | Click a paragraph and type — same font, size and color; move/resize blocks; Arabic and right-to-left text shaped correctly. Select an existing image to move, resize (handles), rotate, replace, extract or delete it — only that placement changes. Add text, images and links. Redact. |
+| **Annotate & review** | Highlight / underline / strike, notes, text boxes, signatures, review marks (strikeout, squiggly, insert, replace), comments list in the sidebar. |
+| **Forms** | Fill forms; create text, paragraph, checkbox, radio, dropdown, list and signature fields by dragging on the page; **Auto-Detect** blanks (`Name: ____`, boxes, checkboxes) like "Prepare Form". |
+| **Pages** | Thumbnail grid: select, drag to reorder, rotate, insert, copy/paste, extract, delete; merge files; page numbers; uniform page size; split by ranges, every N pages, bookmarks or file size. |
+| **Stamp** | Watermarks (text or image, opacity, rotation, behind/over content, Arabic), headers & footers with `{page}` `{pages}` `{date}` `{title}` `{filename}`, Bates numbering. |
+| **Protect** | AES-256 passwords with permissions, remove passwords, flatten annotations/forms, edit properties, remove hidden data (metadata, XMP, JavaScript, attachments…). |
+| **OCR** | Apple Vision (fast, on-device, Arabic + English + 30 more) or Tesseract; adds an invisible, searchable text layer. |
+| **Convert** | Word/RTF/ODT/HTML/Markdown/text/images → PDF; PDF → Word, Excel, PowerPoint, Markdown, HTML, text, images. |
+| **Compare** | Word-level text diff across the whole document (robust to reflow) or visual diff for scans; side-by-side report with highlights. |
+| **Navigate** | Sidebar with pages, outline, comments and full-text search; bookmark editor; zoom/page pill; ⌘K command palette; Tools hub. |
+| **Print** | **Print to HP LaserJet** (copies, page range, paper, darkness, toner saver; printer status; auto-retry if the printer was asleep) or the system print dialog. |
 
-![Highlighting text with the full annotation color palette](docs/images/annotate.png)
-
-- **Signatures** — draw your signature with the trackpad, *or* type your name and pick a cursive style. Saved signatures live in a reusable gallery and stamp onto the page as clean transparent images.
-- **Fill & Sign** — click to type text, stamp checkmarks / crosses / dots, stamp today's date, or drop your active signature.
-- **Pages** — a thumbnail grid: click to select, drag to reorder, rotate / extract / delete, append other PDFs, add page numbers (position, style, start), resize every page to one uniform size (Letter / Legal / A4 / A5 — great after merging mixed sizes), or build a new PDF from images.
-
-![Page management grid](docs/images/pages.png)
-
-- **Merge & reduce size** — combine many files into one document (⇧⌘M), then drag pages to reorder; shrink a PDF at three quality levels with a before/after size readout.
-- **Redline** — review marks: strikeout, squiggly underline, insert carets, replace-with-note suggestions, and margin notes.
-- **OCR** — recognize all pages or just the current one; enhance scans (grayscale, denoise, contrast, sharpening).
-- **Export** — Word, Excel, PowerPoint, Markdown, HTML, plain text, and page images.
-
-Every change becomes a new version in a private session folder, so **Undo/Redo (⌘Z / ⇧⌘Z) walks real history** and your original file is only touched when you **Save (⌘S)**. Export a copy any time with the share button or ⇧⌘E.
-
-## How it works
-
-A native SwiftUI/PDFKit app fronts a local Python engine:
-
-- **PDFKit** for viewing, instant annotations, and page management.
-- **PyMuPDF** for text search, redaction-overlay replacement, text insertion, rendering, and export primitives.
-- **pypdf** for reliable merge and page writing.
-- **OCRmyPDF** with Tesseract, qpdf, and Ghostscript for searchable scanned PDFs.
-- **pdf2docx** for first-pass PDF → Word conversion.
-- **pymupdf4llm** for stronger Markdown export when available.
-- **openpyxl** and **python-pptx** for first-pass Excel and PowerPoint exports.
+Undo/redo walks real document versions; the original file only changes on Save.
 
 ## Build & run
 
-```bash
-git clone https://github.com/wassermanproductions/sam-pdf-studio.git
-cd sam-pdf-studio
-./script/build_and_run.sh
-```
-
-The first run creates the Python engine venv at
-`~/Library/Application Support/SamPDFStudio/engine-venv`
-(intentionally **outside** iCloud-synced folders — iCloud evicts venv files and makes Python imports hang). Swift build artifacts live in `~/Library/Caches/SamPDFStudio/build` for the same reason.
-
-OCR system tools come from Homebrew:
+Requires macOS 14+, Command Line Tools, Homebrew Python 3.13, and
+`brew install ghostscript qpdf tesseract`.
 
 ```bash
-brew install qpdf tesseract ghostscript poppler
+source script/dev-env.sh          # SDK + venv + build dirs
+./script/setup-engine.sh          # first time: creates the engine venv
+./script/build_and_run.sh         # builds "PDF Studio.app" into ~/Builds/PDFStudio and opens it
+cp -R ~/Builds/PDFStudio/"PDF Studio.app" /Applications/   # install
 ```
+
+> The macOS 27 SDK implements SwiftUI `@State` as a macro whose plugin ships
+> only with full Xcode, so Command Line Tools builds use the 26.5 SDK
+> (`script/dev-env.sh` sets `SDKROOT`).
+
+## Printing to the HP LaserJet
+
+The app hands jobs to [hp-laserjet-mac-driver](https://gitlab.com/pauyedin/hp-laserjet-mac-driver)
+(installed separately): it writes the PDF plus a `job-<ts>.opts` sidecar into
+`~/HP-LaserJet-spool/`, the driver's launchd watcher prints it, and the app
+follows `watcher.log` to report the result.
+
+## Architecture
+
+- `Sources/SamPDFStudio/` — SwiftUI app. `Design/` (theme tokens and components),
+  `Views/Shell/` (toolbar, sidebar, welcome, tools hub, command palette),
+  `Views/Canvas/` (on-page image editing), `Features/<Area>/` (one sheet per tool,
+  routed by `Features/ToolSheetHost.swift`, catalogued in `Features/ToolCatalog.swift`),
+  `Stores/AppStore+<Feature>.swift` and `Services/PDFEngineClient+<Feature>.swift`.
+- `Engine/pdf_engine.py` — core engine CLI (one JSON reply per command).
+  `Engine/ext/*.py` — feature modules registered via `register(subparsers, api)`.
+  Text arguments are NFC-normalized (the app passes them decomposed).
+- Engine coordinates: points from the top-left of the page's crop box.
 
 ## QA
 
 ```bash
-./script/qa.sh
+./script/qa.sh                    # build + every engine/UI-invariant suite
 ```
 
-The harness verifies:
+QA builds (`defaults write local.pdfstudio.app PDFStudioQA -bool true`) also
+listen for window-snapshot requests (`script/snap.sh out.png`) and log every
+engine invocation to `~/Library/Logs/PDFStudio/engine.log`.
 
-- engine health and Swift build
-- DocumentSession version-stack semantics (undo/redo/branch/save edge cases)
-- UI behavior invariants (reader purity, tool gating, redact isolation, transparent inline editor, version-stack routing)
-- all engine PDF operations: merge, split, extract, delete, rotate, crop, replace text, add/annotate text, redact, notes, signatures, images, links, region paste/move, image/text/Markdown/HTML/DOCX/XLSX/PPTX export, images-to-PDF, OCR (full and current-page), and scan enhancement
+## License
 
-QA scratch files land in `tmp/pdfs/qa`.
-
-## Editing model
-
-PDFs do not behave like Word documents internally. The app uses a practical, widely used strategy: locate visible text, redact the old glyphs, then write replacement text into the same region. This works well for forms, invoices, drafts, labels, and quick corrections. Deep reflow of arbitrary PDF content is a much harder class of editor — for that, export to Word, edit, and re-export.
-
-## Agent control (MCP)
-
-Any MCP agent — **Hermes, Claude Code, Codex, or any other MCP client** — can drive the PDF engine **headlessly** (no GUI): merge, split, redact, add text, OCR, convert, and page operations, all on local file paths. The server lives in [`mcp/`](mcp/) here and is also published standalone as [**sam-pdf-studio-mcp**](https://github.com/wassermanproductions/sam-pdf-studio-mcp).
-
-```bash
-# Claude Code
-claude mcp add sam-pdf-studio -- node /absolute/path/to/SamPDFStudio/mcp/sam-pdf-studio-mcp.mjs
-```
-
-It shells out to the same bundled PyMuPDF engine the app uses, so file paths go in and new file paths come out — inputs are never modified in place. See [`mcp/README.md`](mcp/README.md) for the full tool list and Hermes/Codex/generic setup.
-
-## Support
-
-A few people asked if they could send tips to support my work developing open source tools. So I set up an optional way in case anyone wants to.
-
-No pressure at all. Using the apps, sharing them, starring the repositories, and contributing code all help too. Thank you.
-
-- [GitHub Sponsors](https://github.com/sponsors/wassermanproductions)
-- [Ko-fi](https://ko-fi.com/samwasserman)
-
-## License & credits
-
-**Apache License 2.0** — see [LICENSE](LICENSE). Free to use, modify, fork, and build on, commercially or otherwise.
-
-**Attribution required:** per the [NOTICE](NOTICE) file (Apache 2.0 §4(d)), any use, fork, or redistribution must retain the NOTICE file and credit **Sam Wasserman ([wassermanproductions.com](https://wassermanproductions.com))** in its documentation and about/credits surface.
-
-Created by **Sam Wasserman** — [wassermanproductions.com](https://wassermanproductions.com) · [wasserman.ai](https://wasserman.ai).
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).

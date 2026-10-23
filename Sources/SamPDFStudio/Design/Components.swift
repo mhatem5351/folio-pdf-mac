@@ -462,6 +462,8 @@ struct Badge: View {
     var body: some View {
         Text(text)
             .font(Theme.Font.micro)
+            .lineLimit(1)
+            .fixedSize()
             .foregroundStyle(tint)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)

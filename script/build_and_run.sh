@@ -101,8 +101,6 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$ROOT_DIR</string>
   <key>SamPDFEnginePythonPath</key>
   <string>$ENGINE_PYTHON</string>
-  <key>SamPDFEngineScriptPath</key>
-  <string>$ENGINE_SCRIPT</string>
   <key>SamPDFBuildTime</key>
   <string>$(date '+%b %-d %-I:%M %p')</string>
 </dict>
