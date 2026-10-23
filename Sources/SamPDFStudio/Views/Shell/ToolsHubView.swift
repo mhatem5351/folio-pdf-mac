@@ -200,7 +200,7 @@ struct CommandPaletteView: View {
                             .disabled(!command.enabled)
                             .opacity(command.enabled ? 1 : 0.4)
                             // Identity must follow the command, not the row
-                            // position: `.id(index)` made filtered rows keep
+                            // position: keying rows by index made filtered rows keep
                             // showing the unfiltered first entry ("Open PDF…")
                             // while Return ran the real match.
                             .id(command.id)

@@ -333,7 +333,10 @@ private struct SearchPanel: View {
                 .padding(.bottom, Theme.Spacing.s)
             }
         }
-        .onAppear { focused = true }
+        // Deferred: the PDF canvas grabs first responder in the same pass,
+        // which left the field unfocused so typing went nowhere.
+        .onAppear { DispatchQueue.main.async { focused = true } }
+        .onChange(of: store.searchFocusRequest) { focused = true }
         .onChange(of: store.documentRevision) { runSearch() }
     }
 

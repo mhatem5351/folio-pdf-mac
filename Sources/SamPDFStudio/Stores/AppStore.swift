@@ -202,6 +202,9 @@ final class AppStore: ObservableObject {
     @Published var showToolsHub: Bool = false
     /// Which panel the left sidebar shows.
     @Published var sidebarTab: SidebarTab = .pages
+    /// Bumped by Find (⌘F) so the sidebar search field takes focus even when
+    /// the search tab is already showing.
+    @Published var searchFocusRequest = 0
     @Published var recentFiles: [URL] = []
 
     // Canvas selection state (engine coordinates).
