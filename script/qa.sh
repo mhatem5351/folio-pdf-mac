@@ -24,6 +24,6 @@ swiftc -sdk "$SDKROOT" "$ROOT_DIR/Sources/SamPDFStudio/Models/DocumentSession.sw
 "$VENV_DIR/bin/python3" "$ROOT_DIR/Tests/qa_block_move.py"
 "$VENV_DIR/bin/python3" "$ROOT_DIR/Tests/qa_pdf_tools.py"
 "$VENV_DIR/bin/python3" "$ROOT_DIR/Tests/qa_major_functions.py"
-for suite in qa_document qa_stamps qa_forms qa_images qa_convert qa_arabic_edit qa_ocr_layer qa_unicode_args; do
+for suite in qa_document qa_stamps qa_forms qa_images qa_convert qa_arabic_edit qa_ocr_layer qa_unicode_args qa_reflow; do
   "$VENV_DIR/bin/python3" -W ignore "$ROOT_DIR/Tests/$suite.py"
 done

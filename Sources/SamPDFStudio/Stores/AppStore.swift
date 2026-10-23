@@ -329,6 +329,10 @@ final class AppStore: ObservableObject {
     @Published var trackChanges: Bool {
         didSet { UserDefaults.standard.set(trackChanges, forKey: "trackChanges") }
     }
+    /// UserDefaults key of the text panel's "Reflow text below" toggle
+    /// (bound with @AppStorage in TextStylePanel; missing = on). Read at
+    /// commit time so the store never holds a stale copy.
+    static let reflowBelowDefaultsKey = "edit.reflowBelow"
 
     // Pages mode.
     @Published var selectedPageIndices: Set<Int> = []
@@ -1281,15 +1285,33 @@ final class AppStore: ObservableObject {
         // when the user actually colored a sub-range.
         let colorRunsJSON: String? = block.colorRuns.isEmpty ? nil
             : (try? JSONEncoder().encode(block.colorRuns)).flatMap { String(data: $0, encoding: .utf8) }
+        // "Reflow text below" (text style panel toggle); missing = on.
+        let reflowBelow = UserDefaults.standard.object(forKey: Self.reflowBelowDefaultsKey) as? Bool ?? true
+        let reflowBox = ReflowResultBox()
         runEngineOp(title: "Edit Text", onDone: { [weak self] in
-            guard let self, let displaced else { return }
+            guard let self else { return }
+            let reflow = reflowBox.value
+            // runEngineOp has just toasted the title; this replaces it. The
+            // edit itself succeeded, so this is informational, not an error.
+            if reflow?.skippedForOverflow == true {
+                self.toast("Edited — text below wasn't moved because it would run off the page")
+            }
+            guard let displaced else { return }
+            // The paragraph the user clicked may have been pushed or pulled
+            // by the reflow: follow it so the re-open lands on it again.
+            var y = displaced.engineRect.midY
+            if let reflow, reflow.applied, let delta = reflow.delta,
+               displaced.page == block.page,
+               displaced.engineRect.minY >= block.engineRect.maxY - 0.5 {
+                y += delta
+            }
             self.editBlock(
                 page: displaced.page,
                 x: displaced.engineRect.midX,
-                y: displaced.engineRect.midY
+                y: y
             )
         }) { [engine] input, output in
-            _ = try engine.replaceBlock(
+            reflowBox.value = try engine.replaceBlock(
                 input: input,
                 output: output,
                 page: block.page,
@@ -1307,8 +1329,9 @@ final class AppStore: ObservableObject {
                 trackOriginal: trackOriginal,
                 originalText: block.originalText,
                 colorRunsJSON: colorRunsJSON,
-                renderRect: block.resizedEngineRectString
-            )
+                renderRect: block.resizedEngineRectString,
+                reflow: reflowBelow
+            ).reflow
         }
     }
 
@@ -2195,4 +2218,10 @@ final class AppStore: ObservableObject {
             .map { URL(fileURLWithPath: $0) }
             .filter { FileManager.default.fileExists(atPath: $0.path) }
     }
+}
+
+/// Carries replace-block's reflow report from the background work closure to
+/// `onDone`.
+private final class ReflowResultBox: @unchecked Sendable {
+    var value: PDFEngineClient.ReplaceBlockReflow?
 }
