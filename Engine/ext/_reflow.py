@@ -538,11 +538,25 @@ def measure_edit(helpers: Any, input_path: str, pno: int, args: Any, rect: Any,
         box = fitz.Rect(bbox)
         extent = box if extent is None else extent | box
     new_bottom = extent.y1 if extent is not None else float(rect.y0)
+    old_bottom = state.get("old_bottom", float(rect.y1))
+    if result.get("minimal"):
+        # The minimal edit knows its geometry exactly (whole line pitches
+        # added or removed); redrawn fragments' glyph boxes say nothing about
+        # the paragraph's height.
+        old_bottom, new_bottom = result["old_bottom"], result["new_bottom"]
+        extent = fitz.Rect(rect.x0, rect.y0, rect.x1, max(rect.y0, new_bottom))
+    else:
+        # Re-laid text: glyph-box noise from a different font's metrics is
+        # not growth. Only whole-line-ish changes move content below.
+        lines = result.get("block_lines") or []
+        size = max((float(l.get("fontsize") or 0) for l in lines), default=10.0)
+        if abs(new_bottom - old_bottom) < 0.5 * size:
+            new_bottom = old_bottom
     return {
         "inserted": result["inserted"],
         "block_lines": result["block_lines"],
         "render_rect": result["render_rect"],
-        "old_bottom": state.get("old_bottom", float(rect.y1)),
+        "old_bottom": old_bottom,
         "new_bottom": new_bottom,
         "extent": extent,
     }

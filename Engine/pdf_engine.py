@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import traceback
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -299,7 +300,12 @@ def system_font_file(raw_name: str, text: str) -> str | None:
     is_bold = "bold" in lowered
     is_italic = "italic" in lowered or "oblique" in lowered
     family = re.split(r"[-,]", cleaned)[0]
-    family = re.sub(r"(MT|PS|Std|Pro)$", "", family)
+    # Vendor suffixes stack ("TimesNewRomanPSMT"): strip until none is left.
+    while True:
+        stripped = re.sub(r"(MT|PS|Std|Pro)$", "", family)
+        if stripped == family or not stripped:
+            break
+        family = stripped
     # Split CamelCase into words: "TimesNewRoman" -> "Times New Roman"
     family_words = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", family).strip()
     if not family_words:
@@ -367,11 +373,14 @@ def resolve_replacement_font(doc: Any, page: Any, style: dict[str, Any], text: s
             with os.fdopen(handle, "wb") as fh:
                 fh.write(buffer)
             scratch.append(path)
-            return {"fontname": "FolioEmbedded", "fontfile": path}
+            # One resource name PER FONT: MuPDF reuses an existing page font
+            # resource with the same name, so a shared "FolioEmbedded" made a
+            # second font's text draw with the first font's glyphs/widths.
+            return {"fontname": f"FolioE{xref}", "fontfile": path}
 
         system_path = system_font_file(raw_name, text)
         if system_path:
-            return {"fontname": "FolioSystem", "fontfile": system_path}
+            return {"fontname": f"FolioS{zlib.crc32(system_path.encode()) & 0xFFFFFF:06x}", "fontfile": system_path}
 
     return {"fontname": style["fontname"], "fontfile": None}
 
@@ -1193,6 +1202,20 @@ def resolve_block_style(doc: Any, page: Any, rect: Any, args: argparse.Namespace
     wants_italic = bool(getattr(args, "italic", False)) \
         or "italic" in (style.get("rawfont") or "").lower() \
         or "oblique" in (style.get("rawfont") or "").lower()
+    # Turning bold/italic OFF: the sampled font IS bold/italic, so pick the
+    # family's regular/upright face explicitly.
+    if getattr(args, "no_bold", False) or getattr(args, "no_italic", False):
+        if getattr(args, "no_bold", False):
+            wants_bold = False
+        if getattr(args, "no_italic", False):
+            wants_italic = False
+        family = args.font or _family_hint(style.get("rawfont")) or "Helvetica"
+        font_choice = resolve_add_text_font(family, wants_bold, wants_italic)
+        style["fontname"] = font_choice["fontname"]
+        font_kwargs = {"fontname": font_choice["fontname"]}
+        if font_choice.get("fontfile"):
+            font_kwargs["fontfile"] = font_choice["fontfile"]
+        return style, font_kwargs
 
     # An explicit font family wins over the sampled style: the user chose it.
     if args.font:
@@ -1246,7 +1269,36 @@ def textbox_line_pitch(font_kwargs: dict[str, Any], size: float) -> float:
     return _PITCH_CACHE[key]
 
 
-def render_block_text(page: Any, origin_x: float, origin_y: float, width: float, text: str, style: dict[str, Any], font_kwargs: dict[str, Any], line_height: float, expand: float, align: int = 0, color_runs: list | None = None) -> bool:
+_BASELINE_CACHE: dict[tuple, float] = {}
+
+
+def textbox_first_baseline(font_kwargs: dict[str, Any], size: float, lineheight: float | None) -> float:
+    """Distance from an insert_textbox rect's top to its first baseline, for
+    this font/size/line height (measured once on a scratch page)."""
+    import fitz
+
+    key = (font_kwargs.get("fontname"), font_kwargs.get("fontfile"), round(size, 2), round(lineheight or 0, 3))
+    if key not in _BASELINE_CACHE:
+        offset = size * 0.8
+        try:
+            scratch = fitz.open()
+            spage = scratch.new_page(width=600, height=400)
+            extra = {"lineheight": lineheight} if lineheight else {}
+            spage.insert_textbox(fitz.Rect(10, 100, 590, 390), "Hg", fontsize=size, **font_kwargs, **extra)
+            for block in spage.get_text("dict").get("blocks", []):
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        offset = float(span["origin"][1]) - 100
+                        raise StopIteration
+        except StopIteration:
+            pass
+        except Exception:
+            pass
+        _BASELINE_CACHE[key] = offset
+    return _BASELINE_CACHE[key]
+
+
+def render_block_text(page: Any, origin_x: float, origin_y: float, width: float, text: str, style: dict[str, Any], font_kwargs: dict[str, Any], line_height: float, expand: float, align: int = 0, color_runs: list | None = None, first_baseline: float | None = None) -> bool:
     """Draw block text with its top-left at (origin_x, origin_y), wrapping at
     the block's width, growing toward the bottom of the page, shrinking only
     if it cannot fit. `align` maps to fitz.TEXT_ALIGN_*; center/right align
@@ -1262,6 +1314,14 @@ def render_block_text(page: Any, origin_x: float, origin_y: float, width: float,
         min(origin_x + width + expand, page.rect.x1 - 12),
         page.rect.y1 - 12,
     )
+    if first_baseline is not None and not color_runs:
+        # Put the first line's baseline exactly where the original one was
+        # (the bbox-top heuristic moved headings up 0.1 x size, which reflow
+        # then read as a height change and moved everything below).
+        lh = None
+        if line_height and font_size > 0:
+            lh = max(0.75, min(3.0, line_height / textbox_line_pitch(font_kwargs, font_size)))
+        target.y0 = first_baseline - textbox_first_baseline(font_kwargs, font_size, lh)
     if color_runs:
         return render_block_text_colored(
             page, target, origin_x, origin_y, text, style, font_kwargs, line_height, align, color_runs
@@ -1414,7 +1474,8 @@ def render_block_text_colored(page: Any, target: Any, origin_x: float, origin_y:
 
 def render_rtl_block_edit(doc: Any, page: Any, args: argparse.Namespace, style: dict[str, Any],
                           per_line_lines: list[dict[str, Any]], new_lines: list[str], new_text: str,
-                          render_rect: Any, resized: bool, color_runs: list | None) -> bool:
+                          render_rect: Any, resized: bool, color_runs: list | None,
+                          strict: bool = False) -> bool | None:
     """Draw replacement text containing Arabic/Hebrew: shaped, bidi-ordered,
     right-aligned by default, logical text in the PDF.
 
@@ -1455,6 +1516,10 @@ def render_rtl_block_edit(doc: Any, page: Any, args: argparse.Namespace, style: 
             for font, text_line, size, color, baseline, left, right, line_rtl in plans:
                 draw_rtl_line(page, font, text_line, size, color, baseline, left=left, right=right, rtl=line_rtl)
             return True
+        if strict:
+            # Only the changed lines were erased: the caller must erase the
+            # rest before a whole-paragraph re-layout.
+            return None
 
     bold = bool(args.bold) or "bold" in (style.get("rawfont") or "").lower()
     font = rtl_font_for(doc, page, new_text, style.get("rawfont"), bold, family=args.font)
@@ -1478,6 +1543,638 @@ def render_rtl_block_edit(doc: Any, page: Any, args: argparse.Namespace, style: 
     if style.get("underline"):
         draw_text_underlines(page, fitz.Rect(result["rect"]) + (-1, -1, 1, 4), style.get("color"))
     return True
+
+
+# --- Minimal ("surgical") block edits ----------------------------------------
+# An edit must change ONLY what the user changed. Untouched lines are never
+# erased or redrawn (they keep the producer's exact kerning, justification,
+# fonts and colors); on a changed line the common prefix stays as-is, the
+# changed middle is drawn in the style of the characters it replaces, and the
+# common suffix is replayed glyph-by-glyph (each glyph's own font, size,
+# color and spacing) shifted only as far as the middle grew or shrank.
+
+_LIGATURES = {"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi",
+              "ﬄ": "ffl", "ﬅ": "st", "ﬆ": "st"}
+
+
+class EditTargetMissing(Exception):
+    """The paragraph named by --original-text is no longer at --rect."""
+
+
+def decompose_ligatures(text: str) -> str:
+    """ﬁ/ﬂ/… as plain letters: base-14 and most substitute fonts have no
+    ligature glyphs (they drew "·"), and the letters re-ligate visually."""
+    return "".join(_LIGATURES.get(ch, ch) for ch in text)
+
+
+def line_char_list(line: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """The line's glyphs in text order, each with its span (style). None when
+    they don't spell the line's text exactly (RTL rows, repaired fonts)."""
+    chars: list[dict[str, Any]] = []
+    for span in line.get("spans") or []:
+        for ch in span.get("chars", []):
+            if ch.get("bbox") is None or ch.get("origin") is None:
+                return None
+            chars.append({"c": ch.get("c", ""), "bbox": ch["bbox"], "origin": ch["origin"], "span": span})
+    if not chars or "".join(c["c"] for c in chars) != line.get("text"):
+        return None
+    return chars
+
+
+def _glyph_key(bbox: Any) -> tuple[float, ...]:
+    return tuple(round(float(v), 2) for v in bbox)
+
+
+def page_glyph_boxes(page: Any) -> list[Any]:
+    import fitz
+
+    boxes = []
+    for block in text_dict(page).get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                for ch in span.get("chars", []):
+                    if ch.get("bbox"):
+                        boxes.append(fitz.Rect(ch["bbox"]))
+    return boxes
+
+
+def glyph_erase_rect(bbox: Any, baseline: float, size: float, foreign: list[Any]) -> Any:
+    """A redaction rect that removes this glyph and NO other: MuPDF deletes
+    every glyph whose box the rect touches, and glyph boxes of tightly leaded
+    lines overlap. Take the glyph's horizontal core and the part of its
+    ascent band that no foreign glyph box covers. None if nothing is free."""
+    import fitz
+
+    rect = fitz.Rect(bbox)
+    width = rect.width
+    x0, x1 = rect.x0 + 0.2 * width, rect.x1 - 0.2 * width
+    if x1 - x0 < 0.2:
+        x0, x1 = rect.x0 + 0.05 * width, rect.x1 - 0.05 * width
+    if x1 <= x0:
+        return None
+    free = [(baseline - 0.7 * size, baseline - 0.05 * size)]
+    for other in foreign:
+        if other.x1 <= x0 or other.x0 >= x1:
+            continue
+        nxt = []
+        for lo, hi in free:
+            if other.y1 <= lo or other.y0 >= hi:
+                nxt.append((lo, hi))
+                continue
+            if other.y0 > lo:
+                nxt.append((lo, other.y0 - 0.05))
+            if other.y1 < hi:
+                nxt.append((other.y1 + 0.05, hi))
+        free = nxt
+    free = [iv for iv in free if iv[1] - iv[0] > 0.3]
+    if not free:
+        return None
+    lo, hi = max(free, key=lambda iv: iv[1] - iv[0])
+    return fitz.Rect(x0, lo, x1, hi)
+
+
+def erase_glyphs(page: Any, targets: list[dict[str, Any]]) -> int:
+    """Remove exactly these glyphs. No white fill (shading, highlights and
+    white-on-color text survive), no vector art removed (rules, underlines,
+    table borders), links and font resources preserved."""
+    import fitz
+
+    if not targets:
+        return 0
+    keys = {_glyph_key(t["bbox"]) for t in targets}
+    foreign = [box for box in page_glyph_boxes(page) if _glyph_key(box) not in keys]
+    rects = []
+    for target in targets:
+        size = float(target["span"].get("size") or 10.0)
+        rect = glyph_erase_rect(target["bbox"], float(target["origin"][1]), size, foreign)
+        if rect is not None:
+            rects.append(rect)
+    reflow_module()._redact(page, rects, images=fitz.PDF_REDACT_IMAGE_NONE,
+                            graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+                            text=fitz.PDF_REDACT_TEXT_REMOVE, preserve=True)
+    return len(rects)
+
+
+class FontPicker:
+    """Per-run font choice: the span's own embedded font when it has every
+    glyph the run needs, else the closest system/base-14 face — decided per
+    RUN, so one new letter never re-fonts a whole paragraph."""
+
+    def __init__(self, doc: Any, page: Any, scratch: list[str]):
+        self.doc, self.page, self.scratch = doc, page, scratch
+        self.cache: dict[tuple[str, frozenset], dict[str, Any]] = {}
+
+    _BASE14 = {"helvetica", "helvetica-bold", "helvetica-oblique", "helvetica-boldoblique",
+               "times-roman", "times-bold", "times-italic", "times-bolditalic",
+               "courier", "courier-bold", "courier-oblique", "courier-boldoblique",
+               "symbol", "zapfdingbats"}
+
+    def exact(self, rawfont: str, text: str) -> bool:
+        """True when redrawing `text` reproduces the original glyphs exactly:
+        the span's own embedded font covers it, or it IS a base-14 font."""
+        kwargs = self.kwargs(rawfont, text)
+        if str(kwargs.get("fontname", "")).startswith("FolioE"):
+            return True
+        return not kwargs.get("fontfile") and strip_subset_prefix(rawfont or "").lower() in self._BASE14
+
+    def font(self, kwargs: dict[str, Any]) -> Any:
+        import fitz
+
+        key = (kwargs.get("fontname"), kwargs.get("fontfile"))
+        cache = self.__dict__.setdefault("_fonts", {})
+        if key not in cache:
+            try:
+                cache[key] = fitz.Font(fontfile=kwargs["fontfile"]) if kwargs.get("fontfile") else fitz.Font(kwargs["fontname"])
+            except Exception:
+                cache[key] = None
+        return cache[key]
+
+    def unscaled(self, chars: list[dict[str, Any]]) -> bool:
+        """The glyphs were drawn without horizontal scaling/condensing: each
+        glyph box is as wide as the font's own advance at that size (a
+        replay with insert_text draws upright, unscaled glyphs)."""
+        checked = 0
+        for ch in chars:
+            c = ch["c"]
+            if not c.strip() or len(c) != 1:
+                continue
+            span = ch["span"]
+            font = self.font(self.kwargs(span.get("font") or "", _span_text(span)))
+            if font is None:
+                return False
+            advance = font.glyph_advance(ord(c)) * _span_size(span)
+            width = float(ch["bbox"][2]) - float(ch["bbox"][0])
+            if advance > 0.5 and abs(width - advance) > max(0.35, 0.06 * advance):
+                return False
+            checked += 1
+            if checked >= 40:
+                break
+        return True
+
+    def kwargs(self, rawfont: str, text: str) -> dict[str, Any]:
+        key = (rawfont or "", frozenset(text))
+        if key not in self.cache:
+            style = {"fontname": builtin_font_alias(rawfont), "fontsize": 11, "color": (0, 0, 0), "rawfont": rawfont}
+            self.cache[key] = resolve_replacement_font(self.doc, self.page, style, text, self.scratch)
+        return self.cache[key]
+
+
+_FONT_OBJECTS: dict[tuple, Any] = {}
+
+
+def _font_object(kwargs: dict[str, Any]) -> Any:
+    import fitz
+
+    key = (kwargs.get("fontname"), kwargs.get("fontfile"))
+    if key not in _FONT_OBJECTS:
+        try:
+            _FONT_OBJECTS[key] = (fitz.Font(fontfile=kwargs["fontfile"]) if kwargs.get("fontfile")
+                                  else fitz.Font(kwargs["fontname"]))
+        except Exception:
+            _FONT_OBJECTS[key] = None
+    return _FONT_OBJECTS[key]
+
+
+def _space_safe(kwargs: dict[str, Any]) -> bool:
+    """Spaces can be drawn as glyphs: the font has its own space glyph, not
+    shared with U+00A0 (a shared glyph comes back as a non-breaking space in
+    the text layer)."""
+    font = _font_object(kwargs)
+    if font is None:
+        return False
+    space = font.has_glyph(0x20)
+    return bool(space) and space != font.has_glyph(0xA0)
+
+
+def _glyph_text(kwargs: dict[str, Any], c: str) -> str:
+    """A ligature character stays itself only if the font maps it; else its
+    letters (what the original text layer usually says anyway)."""
+    if len(c) == 1 and ord(c) in range(0xFB00, 0xFB07):
+        font = _font_object(kwargs)
+        if font is None or not font.has_glyph(ord(c)):
+            return decompose_ligatures(c)
+    return c
+
+
+def _span_size(span: dict[str, Any]) -> float:
+    return float(span.get("size") or 11.0)
+
+
+def _draw(page: Any, x: float, y: float, text: str, kwargs: dict[str, Any], size: float, color: Any) -> float:
+    """Draw `text` at (x, baseline y). Spaces are not drawn as glyphs: words
+    go at their exact positions and text extraction infers the spaces from
+    the gaps. (Fonts mapping U+0020 and U+00A0 to one glyph otherwise came
+    back as non-breaking spaces, breaking search and copy.)"""
+    insert = {"fontname": kwargs["fontname"]}
+    if kwargs.get("fontfile"):
+        insert["fontfile"] = kwargs["fontfile"]
+    if " " not in text or _space_safe(kwargs):
+        page.insert_text((x, y), text, fontsize=size, color=color, **insert)
+        return replacement_text_length(text, kwargs, size)
+    cursor = x
+    for index, word in enumerate(text.split(" ")):
+        if index:
+            cursor += replacement_text_length(" ", kwargs, size)
+        if word:
+            page.insert_text((cursor, y), word, fontsize=size, color=color, **insert)
+            cursor += replacement_text_length(word, kwargs, size)
+    return cursor - x
+
+
+def _text_for_font(picker: FontPicker, rawfont: str, text: str) -> tuple[str, dict[str, Any]]:
+    """Text as drawn plus its font: ligature characters stay as-is when the
+    span's own embedded font has them (identical glyphs, and the text layer
+    keeps "ﬁnal"); only substitute fonts get the decomposed letters."""
+    kwargs = picker.kwargs(rawfont, text)
+    if text == decompose_ligatures(text):
+        return text, kwargs
+    font = _font_object(kwargs)
+    if font is not None and all(font.has_glyph(ord(c)) for c in set(text) if 0xFB00 <= ord(c) <= 0xFB06):
+        return text, kwargs
+    plain = decompose_ligatures(text)
+    return plain, picker.kwargs(rawfont, plain)
+
+
+def _span_text(span: dict[str, Any]) -> str:
+    return "".join(c.get("c", "") for c in span.get("chars", [])) or " "
+
+
+def _replay_ops(chars: list[dict[str, Any]], picker: FontPicker, dx: float = 0.0, dy: float = 0.0) -> list[tuple]:
+    """Glyph-by-glyph redraw at the original positions (+dx/dy), each glyph
+    in its own span's font, size and color."""
+    ops = []
+    for ch in chars:
+        span = ch["span"]
+        kwargs = picker.kwargs(span.get("font") or "", _span_text(span))
+        if not ch["c"].strip() and not (ch["c"] == " " and _space_safe(kwargs)):
+            continue
+        glyph = _glyph_text(kwargs, ch["c"])
+        ops.append((float(ch["origin"][0]) + dx, float(ch["origin"][1]) + dy, glyph,
+                    kwargs, _span_size(span), pdf_color_to_rgb(span.get("color"))))
+    return ops
+
+
+def _chars_exact(chars: list[dict[str, Any]], picker: FontPicker) -> bool:
+    spans = {id(c["span"]): c["span"] for c in chars}
+    return (all(picker.exact(span.get("font") or "", _span_text(span)) for span in spans.values())
+            and picker.unscaled(chars))
+
+
+def plan_line_edit(line: dict[str, Any], new_text: str, picker: FontPicker, right_limit: float,
+                   justified: bool, dy: float = 0.0, replay: bool = False) -> dict[str, Any] | None:
+    """Erase/draw operations turning `line` into `new_text` while touching only
+    what changed. `dy` moves the whole line vertically (lines below a line
+    count change). Returns None when the result would overflow `right_limit`
+    (the caller re-wraps instead)."""
+    chars = line_char_list(line)
+    if chars is None:
+        return None
+    old = line["text"]
+    ops: dict[str, Any] = {"erase": [], "draw": [], "right": max(c["bbox"][2] for c in chars)}
+    if new_text == old and abs(dy) < 0.01:
+        if replay and _chars_exact(chars, picker):
+            # Unchanged line after an edited one: replayed (identical glyphs,
+            # identical positions) so the paragraph keeps its reading order in
+            # the content stream — text extraction, search and copy see the
+            # lines in order rather than the edited line last.
+            ops["erase"].extend(chars)
+            ops["draw"].extend(_replay_ops(chars, picker))
+        return ops
+    moving = abs(dy) >= 0.01
+    n_old, n_new = len(old), len(new_text)
+    p = 0
+    if not moving:
+        while p < min(n_old, n_new) and old[p] == new_text[p]:
+            p += 1
+    # An edited line is redrawn as ONE contiguous line in the content stream
+    # (prefix, new text, suffix — the latter two after the former), else text
+    # extraction / search / copy read "% discount -7". Only with the glyphs'
+    # own fonts, so nothing changes visually.
+    whole_line = _chars_exact(chars, picker)
+    if 0 < p and (whole_line or _chars_exact(chars[:p], picker)):
+        # Keep the edited line ONE line in the text layer: the unchanged
+        # prefix is replayed exactly, right before the new text.
+        ops["erase"].extend(chars[:p])
+        ops["draw"].extend(_replay_ops(chars[:p], picker))
+    q = 0
+    while q < min(n_old, n_new) - p and old[n_old - 1 - q] == new_text[n_new - 1 - q]:
+        q += 1
+    middle_raw = new_text[p:n_new - q]
+    if p < n_old - q:
+        style_char = chars[p]
+    elif p > 0:
+        style_char = chars[p - 1]
+    else:
+        style_char = chars[0]
+    x = chars[p]["origin"][0] if p < n_old else chars[-1]["bbox"][2]
+    ops["erase"].extend(chars[p:n_old - q])
+    right = chars[p - 1]["bbox"][2] if p > 0 else x
+    if middle_raw.strip() or (middle_raw and q):
+        span = style_char["span"]
+        size = _span_size(span)
+        middle, kwargs = _text_for_font(picker, span.get("font") or "", middle_raw)
+        y = float(style_char["origin"][1]) + dy
+        width = replacement_text_length(middle, kwargs, size)
+        ops["draw"].append((x, y, middle, kwargs, size, pdf_color_to_rgb(span.get("color"))))
+        x += width
+        right = max(right, x)
+    suffix = chars[n_old - q:]
+    if suffix:
+        shift = x - float(suffix[0]["origin"][0])
+        if abs(shift) < 0.02:
+            shift = 0.0
+        shifts = [shift] * len(suffix)
+        if shift and justified:
+            # Justified line: absorb the change in the word gaps so the right
+            # edge stays put (the last word doesn't move at all).
+            spaces = [i for i, c in enumerate(suffix) if c["c"] == " "]
+            if spaces:
+                m = len(spaces)
+                gaps_ok = True
+                word = 0
+                for i, ch in enumerate(suffix):
+                    if word < m and i > spaces[word]:
+                        word += 1
+                    shifts[i] = shift * (1 - word / m)
+                if shift > 0:
+                    min_gap = min(
+                        float(suffix[s + 1]["origin"][0]) - float(suffix[s - 1]["bbox"][2]) if 0 < s < len(suffix) - 1 else 99.0
+                        for s in spaces
+                    )
+                    gaps_ok = min_gap - shift / m > 0.12 * _span_size(suffix[0]["span"])
+                if not gaps_ok:
+                    shifts = [shift] * len(suffix)
+        for ch, s_x in zip(suffix, shifts):
+            if abs(s_x) < 0.02 and abs(dy) < 0.01 and not whole_line:
+                right = max(right, ch["bbox"][2])
+                continue
+            ops["erase"].append(ch)
+            span = ch["span"]
+            kwargs = picker.kwargs(span.get("font") or "", _span_text(span))
+            if ch["c"].strip() or (ch["c"] == " " and _space_safe(kwargs)):
+                glyph = _glyph_text(kwargs, ch["c"])
+                ops["draw"].append((float(ch["origin"][0]) + s_x, float(ch["origin"][1]) + dy,
+                                    glyph, kwargs, _span_size(span),
+                                    pdf_color_to_rgb(span.get("color"))))
+            right = max(right, ch["bbox"][2] + s_x)
+    ops["right"] = right
+    if right > right_limit + 1.0:
+        return None
+    return ops
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def _wrap_words(text: str, kwargs: dict[str, Any], size: float, first_width: float, width: float) -> list[str]:
+    """Greedy word wrap; the first line may be narrower (indent)."""
+    lines: list[str] = []
+    current = ""
+    limit = first_width
+    for word in text.split(" "):
+        candidate = word if not current else current + " " + word
+        if current and replacement_text_length(candidate, kwargs, size) > limit:
+            lines.append(current)
+            current = word
+            limit = width
+        else:
+            current = candidate
+    lines.append(current)
+    return lines
+
+
+def minimal_block_edit(doc: Any, page: Any, block_lines: list[dict[str, Any]], new_text: str,
+                       rect: Any, args: argparse.Namespace, scratch_files: list[str],
+                       before_render: Any = None, render_rect: Any = None) -> dict[str, Any] | None:
+    """Apply the edit touching only what changed. Returns the apply_block_edit
+    result (plus old/new bottom for reflow), or None when this path can't
+    express the edit (caller falls back to re-laying the block)."""
+    import fitz
+
+    lines = sorted(block_lines, key=lambda line: (float(line["origin"][1]), float(line["origin"][0])))
+    if any(line_char_list(line) is None for line in lines):
+        return None
+    if any(line.get("dir") and (abs(line["dir"][0] - 1) > 0.01 or abs(line["dir"][1]) > 0.01) for line in lines):
+        return None  # rotated / vertical text: re-laid by the general path
+    picker = FontPicker(doc, page, scratch_files)
+    old_texts = [line["text"] for line in lines]
+    new_lines = new_text.split("\n")
+    baselines = [float(line["origin"][1]) for line in lines]
+    sizes = [_span_size(line_char_list(line)[0]["span"]) for line in lines]
+    if len(lines) >= 2:
+        pitch = _median([b - a for a, b in zip(baselines, baselines[1:]) if b - a > 0.5]) if any(
+            b - a > 0.5 for a, b in zip(baselines, baselines[1:])) else sizes[0] * 1.2
+    else:
+        pitch = float(args.line_height) if getattr(args, "line_height", 0) else sizes[0] * 1.2
+    rights = [max(c["bbox"][2] for c in line_char_list(line)) for line in lines]
+    block_right = max(rights)
+    lefts = [float(line_char_list(line)[0]["origin"][0]) for line in lines]
+    column_left = min(lefts[1:]) if len(lefts) > 1 else lefts[0]
+    single = len(lines) == 1
+    # Single-line text (a heading, a label) may grow to the right; a
+    # paragraph wraps at its own column edge.
+    right_limit = (min(page.rect.x1 - 18, block_right + float(getattr(args, "expand", 0) or 0))
+                   if single else block_right)
+    if single:
+        foreign = [box for box in page_glyph_boxes(page)
+                   if box.x0 > block_right + 0.5
+                   and box.y1 > lines[0]["bbox"][1] + 0.5 and box.y0 < lines[0]["bbox"][3] - 0.5]
+        if foreign:
+            right_limit = min(right_limit, min(box.x0 for box in foreign) - 2.0)
+
+    def is_justified(index: int) -> bool:
+        return (len(lines) >= 2 and index < len(lines) - 1
+                and rights[index] >= block_right - 1.5 and " " in old_texts[index])
+
+    def is_soft(index: int) -> bool:
+        # The line ran to the column edge: the paragraph continues on the next
+        # line (a soft wrap), as opposed to a hard break.
+        width = max(1.0, block_right - column_left)
+        return index < len(lines) - 1 and rights[index] >= block_right - max(3 * sizes[index], 0.12 * width)
+
+    # A right-aligned column value (an invoice amount) keeps its RIGHT edge:
+    # growing from the left edge would push it out of its column.
+    if (single and len(new_lines) == 1 and new_text != old_texts[0] and new_text.strip()
+            and float(rect.x0) > 0.55 * page.rect.width and len(new_text.strip()) <= 32
+            and right_aligned_evidence(page, rect, old_texts[0])):
+        chars = line_char_list(lines[0])
+        span = next((c["span"] for c in chars if c["c"].strip()), chars[0]["span"])
+        size = _span_size(span)
+        text = decompose_ligatures(new_text)
+        kwargs = picker.kwargs(span.get("font") or "", text)
+        width = replacement_text_length(text, kwargs, size)
+        x = max(page.rect.x0 + 2, rights[0] - width)
+        erase_glyphs(page, chars)
+        render = render_rect or rect
+        if before_render is not None:
+            before_render(page, {"block_lines": block_lines, "render_rect": render})
+        _draw(page, x, baselines[0], text, kwargs, size, pdf_color_to_rgb(span.get("color")))
+        bottom = float(lines[0]["bbox"][3])
+        return {"inserted": True, "block_lines": block_lines, "render_rect": render,
+                "old_bottom": bottom, "new_bottom": bottom, "minimal": True}
+
+    k = 0
+    while k < min(len(old_texts), len(new_lines)) and old_texts[k] == new_lines[k]:
+        k += 1
+    if k == len(old_texts) == len(new_lines):
+        return {"inserted": True, "block_lines": block_lines, "render_rect": render_rect or rect,
+                "old_bottom": float(lines[-1]["bbox"][3]), "new_bottom": float(lines[-1]["bbox"][3])}
+    t = 0
+    while (t < min(len(old_texts), len(new_lines)) - k
+           and old_texts[len(old_texts) - 1 - t] == new_lines[len(new_lines) - 1 - t]):
+        t += 1
+    old_mid = list(range(k, len(lines) - t))
+    new_mid = new_lines[k:len(new_lines) - t]
+
+    erase: list[dict[str, Any]] = []
+    draw: list[tuple] = []
+    line_delta = 0
+    plans = []
+    pairwise_ok = True
+    for offset, index in enumerate(old_mid[:len(new_mid)]):
+        plan = plan_line_edit(lines[index], new_mid[offset], picker, right_limit, is_justified(index), replay=True)
+        if plan is None:
+            pairwise_ok = False
+            break
+        plans.append(plan)
+
+    if pairwise_ok:
+        for plan in plans:
+            erase.extend(plan["erase"])
+            draw.extend(plan["draw"])
+        # Lines the user deleted.
+        for index in old_mid[len(new_mid):]:
+            erase.extend(line_char_list(lines[index]))
+        # Lines the user added: below the last kept middle line, in its style.
+        extra = new_mid[len(old_mid):]
+        if extra:
+            anchor = old_mid[-1] if old_mid else max(k - 1, 0)
+            anchor_chars = line_char_list(lines[anchor])
+            span = anchor_chars[0]["span"]
+            size = _span_size(span)
+            color = pdf_color_to_rgb(span.get("color"))
+            base_y = baselines[anchor] if old_mid or k > 0 else baselines[0] - pitch
+            x = column_left if (old_mid or k > 0) else lefts[0]
+            for n, text in enumerate(extra, start=1):
+                text = decompose_ligatures(text)
+                if text.strip():
+                    kwargs = picker.kwargs(span.get("font") or "", text)
+                    if x + replacement_text_length(text, kwargs, size) > right_limit + 1.0:
+                        pairwise_ok = False
+                        break
+                    draw.append((x, base_y + n * pitch, text, kwargs, size, color))
+        line_delta = len(new_mid) - len(old_mid)
+
+    if not pairwise_ok:
+        # Re-wrap the changed region at the column width. Extend it over the
+        # rest of the paragraph while lines are soft-wrapped, so no orphan
+        # fragments are left behind.
+        erase, draw = [], []
+        end = len(lines) - t
+        new_end = len(new_lines) - t
+        while end < len(lines) and end > 0 and is_soft(end - 1):
+            end += 1
+            new_end += 1
+        region_old = list(range(k, end))
+        region_new = new_lines[k:new_end]
+        if not region_old:
+            return None
+        paragraphs: list[str] = []
+        current = ""
+        for offset, text in enumerate(region_new):
+            current = text if not current else current.rstrip() + " " + text.lstrip()
+            old_index = k + offset
+            soft = old_index < end - 1 and is_soft(old_index)
+            if not soft:
+                paragraphs.append(current)
+                current = ""
+        if current:
+            paragraphs.append(current)
+        first_chars = line_char_list(lines[k])
+        span = first_chars[0]["span"]
+        size = _span_size(span)
+        color = pdf_color_to_rgb(span.get("color"))
+        laid: list[tuple[float, str]] = []
+        first = True
+        for paragraph in paragraphs:
+            paragraph = decompose_ligatures(paragraph)
+            kwargs = picker.kwargs(span.get("font") or "", paragraph or " ")
+            x_first = lefts[k] if first else column_left
+            wrapped = _wrap_words(paragraph, kwargs, size,
+                                  max(10.0, right_limit - x_first), max(10.0, right_limit - column_left))
+            for n, text in enumerate(wrapped):
+                laid.append((x_first if n == 0 else column_left, text))
+            first = False
+        for index in region_old:
+            erase.extend(line_char_list(lines[index]))
+        for n, (x, text) in enumerate(laid):
+            if text.strip():
+                kwargs = picker.kwargs(span.get("font") or "", text)
+                draw.append((x, baselines[k] + n * pitch, text, kwargs, size, color))
+        line_delta = len(laid) - len(region_old)
+        t = len(lines) - end
+
+    # Identical lines below a line-count change move by whole line pitches,
+    # replayed glyph-by-glyph so they keep every font/size/color/position.
+    dy = line_delta * pitch
+    for index in range(len(lines) - t, len(lines)):
+        # Below a line-count change the identical lines move by whole pitches;
+        # otherwise they are replayed in place (reading order, see replay).
+        plan = plan_line_edit(lines[index], old_texts[index], picker, page.rect.x1, False,
+                              dy=dy if abs(dy) > 0.01 else 0.0, replay=True)
+        if plan is None:
+            return None
+        erase.extend(plan["erase"])
+        draw.extend(plan["draw"])
+
+    # Lines ABOVE the first change are replayed too (identical glyphs and
+    # positions), so the whole paragraph sits contiguously, in order, in the
+    # content stream: copy/paste and search read it as one paragraph instead
+    # of its head, the rest of the page, then its tail.
+    head_erase: list[dict[str, Any]] = []
+    head_draw: list[tuple] = []
+    for index in range(0, k):
+        plan = plan_line_edit(lines[index], old_texts[index], picker, page.rect.x1, False, replay=True)
+        if plan is not None:
+            head_erase.extend(plan["erase"])
+            head_draw.extend(plan["draw"])
+    erase = head_erase + erase
+    draw = head_draw + draw
+
+    # Keep only the user's edit: erase, let reflow clear its region, draw.
+    erase_glyphs(page, erase)
+    render = render_rect or rect
+    if before_render is not None:
+        before_render(page, {"block_lines": block_lines, "render_rect": render})
+    for x, y, text, kwargs, size, color in draw:
+        _draw(page, x, y, text, kwargs, size, color)
+    old_bottom = float(lines[-1]["bbox"][3])
+    return {"inserted": True, "block_lines": block_lines, "render_rect": render,
+            "old_bottom": old_bottom, "new_bottom": old_bottom + dy, "minimal": True}
+
+
+_AMOUNT = re.compile(r"^[\s$€£¥₹%()+\-–—.,:/0-9A-Za-z]*\d[\s$€£¥₹%()+\-–—.,:/0-9A-Za-z]*$")
+
+
+def right_aligned_evidence(page: Any, rect: Any, text: str) -> bool:
+    """A short right-half value is pinned at its right edge only when it IS a
+    right-aligned column value: number-like (an amount, a date, a total) or
+    sharing its right edge with other text on the page. A left-aligned name
+    that merely sits in the right half must not slide leftwards."""
+    if _AMOUNT.match(text or "") and sum(ch.isdigit() for ch in text) >= max(1, len(text.strip()) // 4):
+        return True
+    shared = 0
+    for block in page.get_text("dict").get("blocks", []):
+        for line in block.get("lines", []):
+            x1 = line["bbox"][2]
+            if abs(x1 - rect.x1) <= 1.0 and abs(line["bbox"][1] - rect.y0) > 1.0:
+                shared += 1
+    return shared >= 1
 
 
 def apply_block_edit(doc: Any, page: Any, args: argparse.Namespace, rect: Any, scratch_files: list[str],
@@ -1523,6 +2220,35 @@ def apply_block_edit(doc: Any, page: Any, args: argparse.Namespace, rect: Any, s
         # No original text supplied: fall back to count-based mapping.
         block_lines, complete = lines_info, True
 
+    # The paragraph the user edited is gone from this rect (a stale or
+    # rebased commit): refuse. Erasing the rect blindly would wipe whatever
+    # now sits there.
+    if args.original_text and not block_lines:
+        raise EditTargetMissing("The paragraph changed since you selected it — click it again.")
+
+    # Text-only edits (no style override, no resize): touch ONLY what changed.
+    plain_edit = (
+        complete and block_lines and not resized
+        and not args.font_size and not args.color and not args.bold and not args.font
+        and not getattr(args, "italic", False) and not getattr(args, "underline", False)
+        and not getattr(args, "no_bold", False) and not getattr(args, "no_italic", False)
+        and natural_align(args) and not color_runs and not getattr(args, "background", None)
+        and not text_has_rtl(new_text) and not text_has_rtl(original)
+    )
+    if plain_edit:
+        minimal = minimal_block_edit(doc, page, block_lines, new_text, rect, args, scratch_files,
+                                     before_render=before_render, render_rect=render_rect)
+        if minimal is not None:
+            if args.track_original:
+                grown = fitz.Rect(render_rect) + (-2, -2, 2, 2)
+                annot = page.add_rect_annot(grown)
+                annot.set_colors(stroke=(0.15, 0.4, 0.85))
+                annot.set_border(width=1, dashes=[3, 2])
+                snippet = args.track_original if len(args.track_original) <= 600 else args.track_original[:600] + "…"
+                annot.set_info(title="Tracked change", content=f"Original text:\n{snippet}")
+                annot.update()
+            return minimal
+
     # When the edited text has the same number of lines as the block, render
     # line-by-line at each line's own origin and style — indents and
     # right-aligned amounts stay exactly where they were.
@@ -1535,6 +2261,7 @@ def apply_block_edit(doc: Any, page: Any, args: argparse.Namespace, rect: Any, s
         and not resized
         and not args.font_size and not args.color and not args.bold and not args.font
         and not getattr(args, "italic", False) and not getattr(args, "underline", False)
+        and not getattr(args, "no_bold", False) and not getattr(args, "no_italic", False)
         and natural_align(args)
         and not color_runs
         and len(new_lines) == len(block_lines)
@@ -1542,18 +2269,19 @@ def apply_block_edit(doc: Any, page: Any, args: argparse.Namespace, rect: Any, s
     )
     per_line_fonts: list[dict[str, Any]] = []
     if per_line and not rtl_text:
-        font_cache: dict[str, dict[str, Any]] = {}
+        font_cache: dict[tuple[str, str], dict[str, Any]] = {}
         for line, text_line in zip(block_lines, new_lines):
             raw = line["rawfont"] or ""
-            if raw not in font_cache:
+            key = (raw, text_line)
+            if key not in font_cache:
                 line_style = {
                     "fontname": builtin_font_alias(raw),
                     "fontsize": line["fontsize"],
                     "color": line["color"],
                     "rawfont": raw,
                 }
-                font_cache[raw] = resolve_replacement_font(doc, page, line_style, new_text, scratch_files)
-            per_line_fonts.append(font_cache[raw])
+                font_cache[key] = resolve_replacement_font(doc, page, line_style, text_line or " ", scratch_files)
+            per_line_fonts.append(font_cache[key])
         # An edited line that would spill past the page edge needs wrapping —
         # fall back to flowed rendering in that case.
         for line, text_line, font_choice in zip(block_lines, new_lines, per_line_fonts):
@@ -1576,6 +2304,7 @@ def apply_block_edit(doc: Any, page: Any, args: argparse.Namespace, rect: Any, s
         and natural_align(args)
         and not color_runs
         and not rtl_text
+        and right_aligned_evidence(page, rect, original)
     ):
         if per_line and per_line_fonts:
             measure_kwargs, measure_size = per_line_fonts[0], block_lines[0]["fontsize"]
@@ -1587,11 +2316,33 @@ def apply_block_edit(doc: Any, page: Any, args: argparse.Namespace, rect: Any, s
             # the only floor here is the page itself.
             right_anchor = max(page.rect.x0 + 2, rect.x1 - rendered)
 
+    # RTL per-line edits redraw ONLY the lines whose text changed; unchanged
+    # lines keep their original glyphs (re-shaping them drifted 0.6-0.8pt).
+    rtl_lines = block_lines if per_line else []
+    rtl_new_lines = new_lines
+    erase_set = block_lines
+    rtl_unchanged = False
+    if rtl_text and per_line and block_lines:
+        # Lines BEFORE the first changed one stay untouched; from there on the
+        # paragraph is redrawn in order (its text extracts in reading order).
+        first = next((i for i, (line, text) in enumerate(zip(block_lines, new_lines))
+                      if line.get("text") != text), None)
+        if first is None:
+            # Same text: an explicit re-render (the app never sends these; the
+            # engine CLI uses it to normalise presentation-form glyphs into
+            # logical, searchable text). Redraw the whole paragraph.
+            pass
+        else:
+            rtl_lines = block_lines[first:]
+            rtl_new_lines = new_lines[first:]
+            erase_set = rtl_lines
     if block_lines:
-        erase_lines(page, block_lines, bound=rect)
+        if erase_set:
+            erase_lines(page, erase_set, bound=rect)
     else:
-        page.add_redact_annot(block_erase_rect(rect), fill=(1, 1, 1))
-        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+        reflow_module()._redact(page, [block_erase_rect(rect)], images=fitz.PDF_REDACT_IMAGE_NONE,
+                                graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+                                text=fitz.PDF_REDACT_TEXT_REMOVE, preserve=True)
     if before_render is not None:
         before_render(page, {"block_lines": block_lines, "render_rect": render_rect})
 
@@ -1603,10 +2354,21 @@ def apply_block_edit(doc: Any, page: Any, args: argparse.Namespace, rect: Any, s
 
     inserted = False
     if rtl_text and new_text.strip():
-        inserted = render_rtl_block_edit(
-            doc, page, args, style, block_lines if per_line else [], new_lines, new_text,
-            render_rect, resized, color_runs,
-        )
+        if rtl_unchanged:
+            inserted = True
+        else:
+            partial = erase_set is not block_lines
+            inserted = render_rtl_block_edit(
+                doc, page, args, style, rtl_lines, rtl_new_lines, new_text,
+                render_rect, resized, color_runs, strict=partial,
+            )
+            if inserted is None:
+                kept = [line for line in block_lines if line not in erase_set]
+                if kept:
+                    erase_lines(page, kept, bound=rect)
+                inserted = render_rtl_block_edit(
+                    doc, page, args, style, [], new_lines, new_text, render_rect, resized, color_runs,
+                )
     elif per_line and new_text.strip():
         inserted = True
         for line, text_line, font_choice in zip(block_lines, new_lines, per_line_fonts):
@@ -1627,11 +2389,14 @@ def apply_block_edit(doc: Any, page: Any, args: argparse.Namespace, rect: Any, s
         # A dragged-out width is exact: no `--expand` headroom past its right
         # edge, so the reflowed text stays inside the box the user drew.
         expand = 0.0 if resized else args.expand
+        first_baseline = None
+        if block_lines and not resized and block_lines[0].get("origin"):
+            first_baseline = float(min(block_lines, key=lambda l: l["origin"][1])["origin"][1])
         inserted = render_block_text(
             page, origin_x, render_rect.y0, max(1.0, render_rect.x1 - origin_x), new_text,
             style, font_kwargs, args.line_height, expand,
             align=align_constant(getattr(args, "align", "auto")),
-            color_runs=color_runs,
+            color_runs=color_runs, first_baseline=first_baseline,
         )
 
     # Track Changes: leave a dashed blue review box whose note holds the
@@ -1681,6 +2446,9 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
             result = apply_block_edit(doc, page, args, rect, scratch_files)
         inserted = result["inserted"]
         doc.save(str(output), garbage=4, deflate=True)
+    except EditTargetMissing as missing:
+        # (the finally below closes the document and removes scratch files)
+        return respond(False, message=str(missing))
     finally:
         doc.close()
         for path in scratch_files:
@@ -1733,6 +2501,10 @@ def block_lines_info(page: Any, rect: Any, segmented: bool = True) -> list[dict[
                 )
                 lines.append({
                     "text": piece["text"],
+                    # The segment's spans (x order, per-char data kept): the
+                    # minimal edit path redraws only what changed from these.
+                    "spans": spans,
+                    "dir": line.get("dir"),
                     "origin": spans[0].get("origin"),
                     "bbox": list(bbox),
                     "rawfont": dominant.get("font"),
@@ -1814,6 +2586,22 @@ def erase_lines(page: Any, lines: list[dict[str, Any]], bound: Any = None) -> No
     ran past the block's edge clipped the neighbouring column's first glyph."""
     import fitz
 
+    # Glyph-precise when the lines carry their glyphs: no neighbour's glyph
+    # (overlapping boxes in tight leading) is ever removed, nothing painted.
+    glyphs: list[dict[str, Any]] = []
+    rest: list[dict[str, Any]] = []
+    for line in lines:
+        chars = line_char_list(line) if line.get("spans") else None
+        if chars:
+            glyphs.extend(chars)
+        else:
+            rest.append(line)
+    if glyphs:
+        erase_glyphs(page, glyphs)
+    if not rest:
+        return
+    lines = rest
+
     limit = fitz.Rect(bound) if bound is not None else None
     for line in lines:
         rect = fitz.Rect(line["bbox"])
@@ -1828,8 +2616,8 @@ def erase_lines(page: Any, lines: list[dict[str, Any]], bound: Any = None) -> No
             )
         if erase.width <= 0 or erase.height <= 0:
             continue
-        page.add_redact_annot(erase, fill=(1, 1, 1))
-    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+        page.add_redact_annot(erase, fill=False)
+    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE, graphics=fitz.PDF_REDACT_LINE_ART_NONE)
 
 
 def cmd_move_block(args: argparse.Namespace) -> int:
@@ -1868,6 +2656,7 @@ def cmd_move_block(args: argparse.Namespace) -> int:
         and text == original
         and not args.font_size and not args.color and not args.bold and not args.font
         and not getattr(args, "italic", False) and not getattr(args, "underline", False)
+        and not getattr(args, "no_bold", False) and not getattr(args, "no_italic", False)
         and natural_align(args)
         and all(line.get("origin") for line in block_lines)
     )
@@ -1894,8 +2683,9 @@ def cmd_move_block(args: argparse.Namespace) -> int:
     if block_lines:
         erase_lines(page, block_lines, bound=rect)
     else:
-        page.add_redact_annot(block_erase_rect(rect), fill=(1, 1, 1))
-        page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+        reflow_module()._redact(page, [block_erase_rect(rect)], images=fitz.PDF_REDACT_IMAGE_NONE,
+                                graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+                                text=fitz.PDF_REDACT_TEXT_REMOVE, preserve=True)
 
     dest_x = max(page.rect.x0 + 6, min(args.dest_x, page.rect.x1 - rect.width - 6))
     dest_y = max(page.rect.y0 + 6, min(args.dest_y, page.rect.y1 - 18))
@@ -3316,6 +4106,8 @@ def build_parser() -> argparse.ArgumentParser:
     replace_block.add_argument("--color")
     replace_block.add_argument("--bold", action="store_true")
     replace_block.add_argument("--italic", action="store_true")
+    replace_block.add_argument("--no-bold", action="store_true", help="make bold text regular")
+    replace_block.add_argument("--no-italic", action="store_true", help="make italic text upright")
     replace_block.add_argument("--underline", action="store_true")
     replace_block.add_argument("--align", choices=["auto", "left", "center", "right"], default="auto")
     replace_block.add_argument("--background", default=None)
@@ -3351,6 +4143,8 @@ def build_parser() -> argparse.ArgumentParser:
     move_block.add_argument("--color")
     move_block.add_argument("--bold", action="store_true")
     move_block.add_argument("--italic", action="store_true")
+    move_block.add_argument("--no-bold", action="store_true", help="make bold text regular")
+    move_block.add_argument("--no-italic", action="store_true", help="make italic text upright")
     move_block.add_argument("--underline", action="store_true")
     move_block.add_argument("--align", choices=["auto", "left", "center", "right"], default="auto")
     move_block.add_argument("--expand", type=float, default=40)
