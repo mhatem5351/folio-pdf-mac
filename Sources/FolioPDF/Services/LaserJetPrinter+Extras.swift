@@ -126,10 +126,19 @@ extension LaserJetPrinter {
         return status
     }
 
-    /// True while jobs wait in the spool (the printer is or will be busy).
+    /// True while jobs wait in the spool, or the driver pushed a job in the last
+    /// 20 s (the printer may still be printing it: a query then can make fwload
+    /// reset it mid-print). The driver stamps /tmp/hp-laserjet-last-push.<uid>.
     static var hasWaitingJobs: Bool {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: spoolDirectory.path)) ?? []
-        return names.contains { $0.hasPrefix("job-") && $0.hasSuffix(".pdf") }
+        if names.contains(where: { $0.hasPrefix("job-") && $0.hasSuffix(".pdf") }) { return true }
+        let stamp = "/tmp/hp-laserjet-last-push.\(getuid())"
+        if let text = try? String(contentsOfFile: stamp, encoding: .utf8),
+           let last = TimeInterval(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+           Date().timeIntervalSince1970 - last < 20 {
+            return true
+        }
+        return false
     }
 
     /// Ask the printer for its status now (PJL query via fwload). Blocks for
