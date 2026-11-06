@@ -1727,6 +1727,37 @@ def glyph_erase_rect(bbox: Any, baseline: float, size: float, foreign: list[Any]
     return fitz.Rect(x0, lo, x1, hi)
 
 
+def merge_erase_rects(rects: list[Any], foreign: list[Any]) -> list[Any]:
+    """Join neighbouring per-glyph erase rects on one line into one rect when
+    the union touches no glyph that must stay. MuPDF's redaction cost grows
+    faster than the rect count (800 rects took ~3.5 s), and a moved paragraph
+    erased glyph by glyph needed many such passes. Same glyphs removed."""
+    import fitz
+
+    if len(rects) < 2:
+        return rects
+    rows: dict[int, list[Any]] = {}
+    for rect in rects:
+        rows.setdefault(int(round((rect.y0 + rect.y1) / 2.0)), []).append(rect)
+    merged: list[Any] = []
+    for row in rows.values():
+        row.sort(key=lambda r: r.x0)
+        band = fitz.Rect(row[0])
+        for rect in row[1:]:
+            band |= rect
+        blockers = [box for box in foreign if box.intersects(band)]
+        current = fitz.Rect(row[0])
+        for rect in row[1:]:
+            union = current | rect
+            if any(box.intersects(union) for box in blockers):
+                merged.append(current)
+                current = fitz.Rect(rect)
+            else:
+                current = union
+        merged.append(current)
+    return merged
+
+
 def erase_glyphs(page: Any, targets: list[dict[str, Any]], frame: "Frame | None" = None) -> int:
     """Remove exactly these glyphs. No white fill (shading, highlights and
     white-on-color text survive), no vector art removed (rules, underlines,
@@ -1746,7 +1777,10 @@ def erase_glyphs(page: Any, targets: list[dict[str, Any]], frame: "Frame | None"
         size = float(target["span"].get("size") or 10.0)
         rect = glyph_erase_rect(target["bbox"], float(target["origin"][1]), size, foreign)
         if rect is not None:
-            rects.append(frame.rect_back(rect) if frame is not None and not frame.identity else rect)
+            rects.append(rect)
+    rects = merge_erase_rects(rects, foreign)
+    if frame is not None and not frame.identity:
+        rects = [frame.rect_back(rect) for rect in rects]
     reflow_module()._redact(page, rects, images=fitz.PDF_REDACT_IMAGE_NONE,
                             graphics=fitz.PDF_REDACT_LINE_ART_NONE,
                             text=fitz.PDF_REDACT_TEXT_REMOVE, preserve=True)
@@ -1923,6 +1957,11 @@ def _draw(page: Any, x: float, y: float, text: str, kwargs: dict[str, Any], size
         point = frame.back(px, y) if frame is not None and not frame.identity else (px, y)
         page.insert_text(point, piece, fontsize=size, color=color, **insert)
 
+    if text == " ":
+        # An explicit word separator: always a glyph (fix_inserted_tounicode
+        # maps a space glyph shared with U+00A0 back to U+0020).
+        put(x, text)
+        return replacement_text_length(text, kwargs, size)
     if " " not in text or _space_safe(kwargs):
         put(x, text)
         return replacement_text_length(text, kwargs, size)
@@ -2169,6 +2208,251 @@ def _wrap_words(text: str, kwargs: dict[str, Any], size: float, first_width: flo
     return lines
 
 
+def build_glyph_snapshot(doc: Any, pno: int, glyphs: list[dict[str, Any]], region: Any,
+                         base: Any = None) -> Any:
+    """A bare copy of page `pno` whose ONLY remaining content is exactly these
+    glyphs (vector art and images removed). Placed with show_pdf_page it
+    moves text without redrawing it: every font, symbol bullet, curly quote,
+    color and weight stays the original, whatever the font. Other glyphs are
+    removed glyph-precisely near the region (a span-level strip dropped a
+    bullet sharing a span with stripped words) and span-wise far from it."""
+    import fitz
+
+    rf = reflow_module()
+    if base is not None:
+        # Cut from an already stripped master (only the edit's moving glyphs
+        # left): far less to remove, so far fewer redactions.
+        bare = fitz.open()
+        bare.insert_pdf(base)
+    else:
+        bare = rf.bare_copy(doc, pno)
+    bp = bare[0]
+    keys = {_glyph_key(g.get("page_bbox", g["bbox"])) for g in glyphs}
+    near = fitz.Rect(region) + (-30, -30, 30, 30)
+    far_spans: list[Any] = []
+    strays: list[dict[str, Any]] = []
+    for block in text_dict(bp).get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                box = fitz.Rect(span["bbox"])
+                if not box.intersects(near):
+                    far_spans.append(box)
+                    continue
+                for ch in span.get("chars", []):
+                    # Stray SPACES go too: a space left behind counts as a
+                    # foreign box, overlaps the next letter and blocks its
+                    # erase, so that letter stayed in the snapshot (its ink
+                    # and its text came along with the moved words).
+                    if ch.get("bbox") and ch.get("origin") and _glyph_key(ch["bbox"]) not in keys:
+                        strays.append({"c": ch["c"], "bbox": ch["bbox"], "origin": ch["origin"], "span": span})
+    if strays:
+        erase_glyphs(bp, strays)
+    if far_spans:
+        rf._redact(bp, far_spans, images=fitz.PDF_REDACT_IMAGE_NONE,
+                   graphics=fitz.PDF_REDACT_LINE_ART_NONE, text=fitz.PDF_REDACT_TEXT_REMOVE)
+    rf._redact(bp, [bp.rect], images=fitz.PDF_REDACT_IMAGE_REMOVE,
+               graphics=fitz.PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED, text=fitz.PDF_REDACT_TEXT_NONE)
+    return bare
+
+
+def snapshot_offsets(snapshot_page: Any, glyphs: list[dict[str, Any]]) -> list[float | None]:
+    """Per glyph of `glyphs`: how far MuPDF slid it horizontally inside the
+    stripped snapshot (None for spaces and glyphs it can't pair). Different
+    text objects inside one extracted span slide by DIFFERENT amounts when
+    their neighbours are stripped, so this is measured glyph by glyph. Pairs
+    by sequence alignment of glyph lists (a ligature's "c" can be "fi")."""
+    import difflib
+
+    offsets: list[float | None] = [None] * len(glyphs)
+    wanted = [(index, g) for index, g in enumerate(glyphs) if g["c"].strip()]
+    if not wanted:
+        return offsets
+    base_y = float(wanted[0][1].get("_page_origin", wanted[0][1]["origin"])[1])
+    found = sorted(
+        (c for block in snapshot_page.get_text("rawdict").get("blocks", [])
+         for line in block.get("lines", []) for span in line.get("spans", [])
+         for c in span.get("chars", [])
+         if c["c"].strip() and abs(float(c["origin"][1]) - base_y) < 1.0),
+        key=lambda c: float(c["origin"][0]),
+    )
+    matcher = difflib.SequenceMatcher(None, [g["c"] for _i, g in wanted], [c["c"] for c in found],
+                                      autojunk=False)
+    for a, b, n in matcher.get_matching_blocks():
+        for k in range(n):
+            index, g = wanted[a + k]
+            offsets[index] = float(found[b + k]["origin"][0]) - float(g.get("_page_origin", g["origin"])[0])
+    return offsets
+
+
+def uniform_groups(glyphs: list[dict[str, Any]], offsets: list[float | None],
+                   tolerance: float = 0.1) -> list[tuple[list[dict[str, Any]], float]]:
+    """Cut `glyphs` where the measured slide changes; unpaired glyphs (spaces)
+    stay with the group before them (or the first one). Returns
+    [(glyphs, slide)]."""
+    groups: list[tuple[list[dict[str, Any]], float | None]] = []
+    for g, off in zip(glyphs, offsets):
+        if off is not None and groups and groups[-1][1] is not None and abs(off - groups[-1][1]) > tolerance:
+            groups.append(([g], off))
+        elif groups:
+            members, current = groups[-1]
+            members.append(g)
+            if current is None and off is not None:
+                groups[-1] = (members, off)
+        else:
+            groups.append(([g], off))
+    return [(members, off or 0.0) for members, off in groups]
+
+
+def snapshot_drift(snapshot_page: Any, glyphs: list[dict[str, Any]]) -> float:
+    """How far MuPDF slid the kept glyphs horizontally while stripping the
+    others from the same text run (removed glyphs' advance isn't fully kept
+    when the run uses character spacing). The stripped snapshot holds just
+    the wanted glyphs, so align its glyphs on the piece's baseline with the
+    wanted ones in x order and take the median offset (robust to ligatures,
+    hyphens and repeated words). 0 if they can't be aligned."""
+    wanted = sorted((g for g in glyphs if g["c"].strip()),
+                    key=lambda g: float(g.get("_page_origin", g["origin"])[0]))
+    if not wanted:
+        return 0.0
+    base_y = float(wanted[0].get("_page_origin", wanted[0]["origin"])[1])
+    found = sorted(
+        (c for block in snapshot_page.get_text("rawdict").get("blocks", [])
+         for line in block.get("lines", []) for span in line.get("spans", [])
+         for c in span.get("chars", [])
+         if c["c"].strip() and abs(float(c["origin"][1]) - base_y) < 1.0),
+        key=lambda c: float(c["origin"][0]),
+    )
+    if not found:
+        return 0.0
+    if len(found) == len(wanted) and all(c["c"] == g["c"] for c, g in zip(found, wanted)):
+        pairs = list(zip(found, wanted))
+    else:
+        # Counts differ (a stray that couldn't be erased, a ligature): pair
+        # each wanted glyph with the nearest same-character glyph instead.
+        pairs = []
+        for g in wanted:
+            gx = float(g.get("_page_origin", g["origin"])[0])
+            same = [c for c in found if c["c"] == g["c"] and abs(float(c["origin"][0]) - gx) < 60]
+            if same:
+                pairs.append((min(same, key=lambda c: abs(float(c["origin"][0]) - gx)), g))
+    if not pairs:
+        return 0.0
+    return _median([float(c["origin"][0]) - float(g.get("_page_origin", g["origin"])[0]) for c, g in pairs])
+
+
+def glyph_region(glyphs: list[dict[str, Any]]) -> Any:
+    import fitz
+
+    region = None
+    size = 0.0
+    for g in glyphs:
+        box = fitz.Rect(g.get("page_bbox", g["bbox"]))
+        region = box if region is None else region | box
+        size = max(size, _span_size(g["span"]))
+    # Ink overhangs the text box (a "p" or an italic sticks out of it): a
+    # tight clip cut off first letters. The snapshot holds ONLY the wanted
+    # glyphs, so a generous clip can't pull anything else in.
+    pad = max(2.0, 0.6 * size)
+    return region + (-pad, -pad, pad, pad)
+
+
+def relocation_layout(lines, region_old, paragraphs, picker, baselines, k, pitch, right_limit,
+                      column_left, lefts):
+    """Re-wrap by RELOCATING the paragraph's existing words: every word still
+    in the new text is moved as itself (a snapshot of its glyphs), only words
+    the user typed are drawn fresh in their neighbour's style. Returns
+    (pieces, draws, laid_line_count): pieces = [(glyphs, dx, dy)]."""
+    import difflib
+
+    words = []
+    for index in region_old:
+        current: list[dict[str, Any]] = []
+        lead: dict[str, Any] | None = None
+        previous: dict[str, Any] | None = None
+        for ch in (line_char_list(lines[index]) or []) + [None]:
+            if ch is not None and ch["c"].strip() and not current:
+                # The space glyph before the word moves with it, so copied text
+                # keeps the space next to a newly typed word.
+                lead = previous if previous is not None and not previous["c"].strip() else None
+            if ch is None or not ch["c"].strip():
+                if current:
+                    words.append({"text": "".join(c["c"] for c in current),
+                                  "glyphs": ([lead] if lead is not None else []) + current,
+                                  "x0": float(current[0]["origin"][0]), "x1": float(current[-1]["bbox"][2]),
+                                  "base": float(current[0]["origin"][1]), "line": index})
+                    current = []
+            else:
+                current.append(ch)
+            previous = ch
+    gaps = [b["x0"] - a["x1"] for a, b in zip(words, words[1:]) if a["line"] == b["line"] and b["x0"] > a["x1"]]
+    space = _median(gaps) if gaps else _span_size(words[0]["glyphs"][0]["span"]) * 0.25 if words else 3.0
+    tokens: list[tuple[str, int]] = []   # (word, paragraph index)
+    for pindex, (text, _start) in enumerate(paragraphs):
+        tokens.extend((w, pindex) for w in text.split())
+    matcher = difflib.SequenceMatcher(None, [w["text"] for w in words], [t for t, _ in tokens], autojunk=False)
+    match: dict[int, int] = {}
+    for tag, a0, a1, b0, b1 in matcher.get_opcodes():
+        if tag == "equal":
+            for offset in range(a1 - a0):
+                match[b0 + offset] = a0 + offset
+    pieces: list[tuple[list[dict[str, Any]], float, float]] = []
+    draws: list[tuple] = []
+    line_no = -1
+    cursor = 0.0
+    current_para = -1
+    style = words[0]["glyphs"][0]["span"] if words else None
+    pending_space: tuple | None = None
+    for tindex, (token, pindex) in enumerate(tokens):
+        old = words[match[tindex]] if tindex in match else None
+        if old is not None:
+            style = old["glyphs"][-1]["span"]
+        size = _span_size(style)
+        kwargs = picker.kwargs(style.get("font") or "", token)
+        width = (old["x1"] - old["x0"]) if old is not None else replacement_text_length(token, kwargs, size)
+        new_para = pindex != current_para
+        starting_line = new_para or line_no < 0 or cursor + width > right_limit + 0.5
+        if starting_line:
+            line_no += 1
+            if new_para:
+                start_line = paragraphs[pindex][1]
+                cursor = old["x0"] if (old is not None and old["line"] == start_line) else \
+                    (lefts[k] if pindex == 0 else column_left)
+                current_para = pindex
+            else:
+                cursor = column_left
+        baseline = baselines[k] + line_no * pitch
+        if pending_space is not None:
+            # The space after a typed word, only when this word follows it on
+            # the same line and doesn't bring its own space glyph (a line
+            # ending in a space read back as "it  grows").
+            if not starting_line and not (old is not None and not old["glyphs"][0]["c"].strip()):
+                draws.append(pending_space)
+            pending_space = None
+        if old is not None and tindex - 1 in match and match[tindex - 1] == match[tindex] - 1 \
+                and words[match[tindex - 1]]["line"] == old["line"] and not starting_line:
+            # Still neighbours on the same old line: keep their original gap.
+            prev = words[match[tindex - 1]]
+            cursor += (old["x0"] - prev["x1"]) - space
+        if old is not None:
+            dx, dy = cursor - old["x0"], baseline - old["base"]
+            if pieces and pieces[-1][3] == old["line"] and abs(pieces[-1][1] - dx) < 0.01 \
+                    and abs(pieces[-1][2] - dy) < 0.01 and pieces[-1][4] == line_no:
+                pieces[-1][0].extend(old["glyphs"])
+            else:
+                pieces.append([list(old["glyphs"]), dx, dy, old["line"], line_no])
+        else:
+            draws.append((cursor, baseline, decompose_ligatures(token), kwargs, size,
+                          pdf_color_to_rgb(style.get("color"))))
+            if tindex + 1 < len(tokens) and tokens[tindex + 1][1] == pindex:
+                # A real space after a typed word: without it copied text ran
+                # it into the next (moved) word ("reallyevery").
+                pending_space = (cursor + width, baseline, " ", kwargs, size, pdf_color_to_rgb(style.get("color")))
+        cursor += width + space
+    return [(p[0], p[1], p[2]) for p in pieces], draws, line_no + 1
+
+
 def minimal_block_edit(doc: Any, page: Any, block_lines: list[dict[str, Any]], new_text: str,
                        rect: Any, args: argparse.Namespace, scratch_files: list[str],
                        before_render: Any = None, render_rect: Any = None) -> dict[str, Any] | None:
@@ -2306,12 +2590,13 @@ def minimal_block_edit(doc: Any, page: Any, block_lines: list[dict[str, Any]], n
     erase: list[dict[str, Any]] = []
     draw: list[tuple] = []
     snaps: list[tuple[dict[str, Any], float, float]] = []   # glyph, dx, dy
+    pieces: list[tuple[list[dict[str, Any]], float, float]] = []   # moved as themselves
     line_delta = 0
     plans = []
     pairwise_ok = True
     for offset, index in enumerate(old_mid[:len(new_mid)]):
         plan = plan_line_edit(lines[index], new_mid[offset], picker, right_limit, is_justified(index),
-                              replay=may_replay(lines[index]), snap_ok=False)
+                              replay=may_replay(lines[index]), snap_ok=frame.identity)
         if plan is None:
             pairwise_ok = False
             break
@@ -2372,12 +2657,24 @@ def minimal_block_edit(doc: Any, page: Any, block_lines: list[dict[str, Any]], n
                 current = ""
         if current:
             paragraphs.append((current, current_start))
+        if frame.identity:
+            # Move the paragraph's own words; draw only what the user typed.
+            moved, fresh, laid_count = relocation_layout(lines, region_old, paragraphs, picker, baselines,
+                                                         k, pitch, right_limit, column_left, lefts)
+            for index in region_old:
+                erase.extend(line_char_list(lines[index]))
+            pieces.extend(moved)
+            draw.extend(fresh)
+            line_delta = laid_count - len(region_old)
+            t = len(lines) - end
         first_chars = line_char_list(lines[k])
         span = first_chars[0]["span"]
         size = _span_size(span)
         color = pdf_color_to_rgb(span.get("color"))
         laid: list[tuple[float, str]] = []
         kept: set[int] = set()   # ids of glyphs left as they are (or snapshot-moved)
+        if frame.identity:
+            paragraphs = []      # relocation above already laid everything out
         first = True
         for paragraph, start_line in paragraphs:
             paragraph = decompose_ligatures(paragraph)
@@ -2410,25 +2707,33 @@ def minimal_block_edit(doc: Any, page: Any, block_lines: list[dict[str, Any]], n
             for n, text in enumerate(wrapped):
                 laid.append((x_first if n == 0 else column_left, text))
             first = False
-        for index in region_old:
+        for index in (region_old if not frame.identity else []):
             erase.extend(c for c in line_char_list(lines[index]) if id(c) not in kept
                          or any(c is snap[0] for snap in snaps))
         for n, (x, text) in enumerate(laid):
             if text.strip():
                 ops, _w = _run_ops(picker, span.get("font") or "", text, x, baselines[k] + n * pitch, size, color)
                 draw.extend(ops)
-        line_delta = len(laid) - len(region_old)
-        t = len(lines) - end
+        if not frame.identity:
+            line_delta = len(laid) - len(region_old)
+            t = len(lines) - end
 
     # Identical lines below a line-count change move by whole line pitches,
     # replayed glyph-by-glyph so they keep every font/size/color/position.
     dy = line_delta * pitch
-    for index in range(len(lines) - t, len(lines)):
+    tail = list(range(len(lines) - t, len(lines)))
+    if frame.identity and abs(dy) > 0.01 and tail:
+        for index in tail:
+            moving = line_char_list(lines[index])
+            erase.extend(moving)
+            pieces.append((moving, 0.0, dy))
+        tail = []
+    for index in tail:
         # Below a line-count change the identical lines move by whole pitches;
         # otherwise they are replayed in place (reading order, see replay).
         plan = plan_line_edit(lines[index], old_texts[index], picker, page_rect.x1, False,
                               dy=dy if abs(dy) > 0.01 else 0.0, replay=may_replay(lines[index]),
-                              snap_ok=False)
+                              snap_ok=frame.identity)
         if plan is None:
             return None
         erase.extend(plan["erase"])
@@ -2452,25 +2757,113 @@ def minimal_block_edit(doc: Any, page: Any, block_lines: list[dict[str, Any]], n
 
     # Snapshots of glyphs that move but can't be redrawn exactly, taken from
     # the page BEFORE anything is erased.
+    # Single glyphs that had to move but can't be redrawn exactly join the
+    # pieces, grouped per line and offset.
+    grouped: dict[tuple, list[dict[str, Any]]] = {}
+    for ch, dx, move_y in snaps:
+        grouped.setdefault((round(float(ch["origin"][1]), 1), round(dx, 3), round(move_y, 3)), []).append(ch)
+    for (_y, dx, move_y), glyphs in grouped.items():
+        pieces.append((glyphs, dx, move_y))
+    # A piece that ends up exactly where it was isn't touched at all: no
+    # erase, no snapshot (on tight leading an erase can't always isolate a
+    # glyph, and re-placing it would double the line).
+    # (By glyph position: the erase list and the pieces hold separate records
+    # of the same glyphs.)
+    # Unmoved glyphs whose own font can be reused are REPLAYED exactly (keeps
+    # the paragraph in reading order in the content stream); only those that
+    # can't be (a symbol bullet) are left untouched where they are.
+    still: set[tuple[float, ...]] = set()
+    replay_groups: list[tuple[float, float, list[tuple]]] = []
+    for glyphs, dx, move_y in pieces:
+        if abs(dx) < 0.01 and abs(move_y) < 0.01:
+            exact = [g for g in glyphs if not g["c"].strip() or _chars_exact([g], picker)]
+            if len(exact) == len(glyphs):
+                ops = _replay_ops(glyphs, picker)
+                if ops:
+                    # Ordered as ONE group at the piece's first baseline: a
+                    # superscript sorted by its own baseline went before its
+                    # line and "marker12" read back as "12" + "marker".
+                    replay_groups.append((ops[0][1], ops[0][0], ops))
+            else:
+                still.update(_glyph_key(g.get("page_bbox", g["bbox"])) for g in glyphs)
+    pieces = [piece for piece in pieces if not (abs(piece[1]) < 0.01 and abs(piece[2]) < 0.01)]
+    if still:
+        erase = [g for g in erase if _glyph_key(g.get("page_bbox", g["bbox"])) not in still]
     snapshots = []
-    if snaps:
-        rf = reflow_module()
-        for ch, dx, move_y in snaps[:40]:
-            region = (fitz.Rect(ch["page_bbox"]) + (-0.3, -0.3, 0.3, 0.3)) & page.rect
-            bare = rf.bare_copy(doc, page.number)
-            snapshots.append((rf.build_snapshot(bare, region), region, dx, move_y))
+    pieces_by_region: dict[int, list[dict[str, Any]]] = {}
+    # One master holding every moving glyph: each piece's snapshot is cut
+    # from it (a strip of the full page per piece took ~1 s each).
+    moving_glyphs = [g for glyphs, _dx, _dy in pieces for g in glyphs]
+    master = None
+    if len(pieces) > 1 and moving_glyphs:
+        master_region = glyph_region(moving_glyphs) & page.rect
+        master = build_glyph_snapshot(doc, page.number, moving_glyphs, master_region)
+
+    def add_snapshot(glyphs: list[dict[str, Any]], dx: float, move_y: float, depth: int) -> None:
+        region = glyph_region(glyphs) & page.rect
+        snapshot = build_glyph_snapshot(doc, page.number, glyphs, region, base=master)
+        groups = uniform_groups(glyphs, snapshot_offsets(snapshot[0], glyphs))
+        if len(groups) > 1 and depth < 2:
+            # Parts of the piece slid differently: each part gets its own
+            # snapshot (holding only its glyphs, so no text is duplicated).
+            snapshot.close()
+            for members, _slide in groups:
+                if any(g["c"].strip() for g in members):
+                    add_snapshot(members, dx, move_y, depth + 1)
+            return
+        drift = _median([slide for members, slide in groups for _g in members]) if len(groups) > 1 else groups[0][1]
+        entry = (snapshot, region, dx, move_y, drift)
+        snapshots.append(entry)
+        pieces_by_region[id(entry)] = glyphs
+
+    for glyphs, dx, move_y in pieces:
+        if glyphs:
+            add_snapshot(glyphs, dx, move_y, 0)
+    if master is not None:
+        master.close()
 
     # Keep only the user's edit: erase, let reflow clear its region, draw.
     erase_glyphs(page, erase, frame)
-    for snapshot, region, dx, move_y in snapshots:
-        page.show_pdf_page(region + (dx, move_y, dx, move_y), snapshot, 0, clip=region,
-                           keep_proportion=False, overlay=True)
-        snapshot.close()
+    # Moved pieces and fresh words go onto the page in READING order (line by
+    # line, left to right), so copy/paste and search read the text in order.
+    # Reflow clears the content below first, so it can't touch moved text.
     render = render_rect or rect
     if before_render is not None:
         before_render(page, {"block_lines": block_lines, "render_rect": render})
-    for x, y, text, kwargs, size, color in draw:
-        _draw(page, x, y, text, kwargs, size, color, frame)
+    placements: list[tuple[float, float, int, Any]] = []
+    for item in snapshots:
+        _snap, region, dx, move_y, _drift = item
+        first = next((g for g in pieces_by_region.get(id(item), []) if g["c"].strip()), None)
+        y = float(first["origin"][1]) + move_y if first else region.y1 + move_y
+        placements.append((round(y, 0), region.x0 + dx, 0, item))
+    # Draw ops keep their list order inside a line: consecutive ops are one
+    # group (keyed by its first op) until x goes back or the baseline jumps
+    # a line; a superscript's raised baseline stays with its line.
+    group_key: tuple[float, float] | None = None
+    last: tuple | None = None
+    for item in draw:
+        x, y, size = float(item[0]), float(item[1]), float(item[4] or 10.0)
+        if group_key is None or last is None or x < float(last[0]) - 0.01 \
+                or abs(y - group_key[0]) > 0.6 * size:
+            group_key = (y, x)
+        placements.append((round(group_key[0], 0), group_key[1], 1, item))
+        last = item
+    for group_y, group_x, ops in replay_groups:
+        for op in ops:
+            placements.append((round(group_y, 0), group_x, 1, op))
+    # (A stable sort: a replay group keeps its glyph order.)
+    for _y, _x, kind, item in sorted(placements, key=lambda entry: (entry[0], entry[1])):
+        if kind == 0:
+            snapshot, region, dx, move_y, drift = item
+            # The kept glyphs sit `drift` off in the snapshot: clip where
+            # they really are, place where they belong.
+            source = region + (drift, 0, drift, 0)
+            page.show_pdf_page(region + (dx, move_y, dx, move_y), snapshot, 0, clip=source,
+                               keep_proportion=False, overlay=True)
+            snapshot.close()
+        else:
+            x, y, text, kwargs, size, color = item
+            _draw(page, x, y, text, kwargs, size, color, frame)
     old_bottom = float(lines[-1]["bbox"][3])
     if not frame.identity:
         # Geometry is in the text's own frame: report no page-space growth
