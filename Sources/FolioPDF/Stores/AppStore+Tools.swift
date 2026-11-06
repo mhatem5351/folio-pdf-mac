@@ -85,8 +85,6 @@ extension AppStore {
             let temp = FileManager.default.temporaryDirectory
                 .appendingPathComponent("folio-print-\(UUID().uuidString)", isDirectory: true)
             defer { try? FileManager.default.removeItem(at: temp) }
-            let retrySource = FileManager.default.temporaryDirectory
-                .appendingPathComponent("folio-print-retry-\(UUID().uuidString).pdf")
             let job: URL
             let offset: UInt64
             do {
@@ -98,8 +96,6 @@ extension AppStore {
                     _ = try engine.extractPages(input: source, output: subset, pages: pageSpec)
                     source = subset
                 }
-                try? FileManager.default.removeItem(at: retrySource)
-                try FileManager.default.copyItem(at: source, to: retrySource)
                 offset = LaserJetPrinter.logOffset()
                 job = try LaserJetPrinter.submit(pdf: source, options: options)
             } catch {
@@ -113,28 +109,19 @@ extension AppStore {
                 self?.busy = false
                 self?.toast(options.copies > 1 ? "Printing \(options.copies) copies of \(name)…" : "Printing \(name)…")
             }
-            var outcome = LaserJetPrinter.waitForOutcome(job: job, startOffset: offset)
-            // A sleeping printer can reject the first USB write before any byte
-            // lands; nothing was printed, so resend once after it wakes.
-            if case .failed(_, retryable: true) = outcome, let retryData = try? Data(contentsOf: retrySource) {
-                Thread.sleep(forTimeInterval: 2)
-                let retryFile = FileManager.default.temporaryDirectory.appendingPathComponent("folio-retry-\(UUID().uuidString).pdf")
-                if (try? retryData.write(to: retryFile)) != nil {
-                    let retryOffset = LaserJetPrinter.logOffset()
-                    if let retryJob = try? LaserJetPrinter.submit(pdf: retryFile, options: options) {
-                        outcome = LaserJetPrinter.waitForOutcome(job: retryJob, startOffset: retryOffset)
-                    }
-                    try? FileManager.default.removeItem(at: retryFile)
-                }
-            }
-            try? FileManager.default.removeItem(at: retrySource)
+            // No automatic resend: the driver already resets a dozing printer
+            // and retries once, and it keeps a failed job to ask the user about
+            // (Print / Later / Discard) once the printer is usable again.
+            let outcome = LaserJetPrinter.waitForOutcome(job: job, startOffset: offset)
             DispatchQueue.main.async {
                 switch outcome {
                 case .printed:
-                    self?.toast("Sent to HP LaserJet ✓")
+                    self?.toast(options.twoSided
+                        ? "Front sides sent — when they finish, follow the prompt to put the stack back in"
+                        : "Sent to HP LaserJet ✓")
                 case .queuedNoPrinter:
                     self?.toast("Printer not connected — the job will print when it's plugged in")
-                case .failed(let message, _):
+                case .failed(let message):
                     self?.errorMessage = message
                 case .timedOut:
                     self?.toast("Still printing… check the printer")

@@ -11,6 +11,7 @@ struct LaserJetPrintSheet: View {
     @AppStorage("laserjet.density") private var density = 3
     @AppStorage("laserjet.customDensity") private var customDensity = false
     @AppStorage("laserjet.economode") private var economode = false
+    @AppStorage("laserjet.twoSided") private var twoSided = false
     @State private var pages = PageRangeSelection()
     @State private var device: LaserJetPrinter.Device?
     @State private var checked = false
@@ -48,6 +49,21 @@ struct LaserJetPrintSheet: View {
                     }
                     .labelsHidden()
                     .fixedSize()
+                }
+                FormRow("Sides") {
+                    Picker("", selection: $twoSided) {
+                        Text("One side").tag(false)
+                        Text("Both sides").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
+                }
+                if twoSided {
+                    Text("Your printer prints one side at a time. It prints the front sides first, then asks you to put the stack back in the tray, printed side down, and prints the back sides in reverse order. Works with a page range too.")
+                        .font(Theme.Font.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
@@ -107,6 +123,7 @@ struct LaserJetPrintSheet: View {
         options.paper = paper
         options.economode = economode
         options.density = customDensity ? density : nil
+        options.twoSided = twoSided
         store.printToLaserJet(options: options, pageSpec: pages.spec(currentPage: store.currentPageNumber))
         dismiss()
     }

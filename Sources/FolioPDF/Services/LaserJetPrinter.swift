@@ -13,6 +13,9 @@ enum LaserJetPrinter {
         var economode = false
         /// a4, letter, legal, a5, auto.
         var paper = "a4"
+        /// Two-sided by hand (DUPLEX=manual): the driver prints the fronts,
+        /// asks the user to flip the stack, then prints the backs reversed.
+        var twoSided = false
     }
 
     struct Device {
@@ -23,9 +26,10 @@ enum LaserJetPrinter {
     enum Outcome {
         case printed
         case queuedNoPrinter
-        /// `retryable`: the transfer died before any byte reached the printer
-        /// (typically the printer waking from sleep), so resending is safe.
-        case failed(String, retryable: Bool)
+        /// The driver keeps a job whose USB transfer failed and asks the user
+        /// (Print / Later / Discard) once the printer is usable again, so the
+        /// app never resends on its own.
+        case failed(String)
         case timedOut
     }
 
@@ -84,6 +88,7 @@ enum LaserJetPrinter {
         var lines = ["COPIES=\(max(1, options.copies))", "PAPER=\(options.paper)"]
         if let density = options.density { lines.append("DENSITY=\(min(max(density, 1), 5))") }
         lines.append("ECONOMODE=\(options.economode ? "on" : "off")")
+        lines.append("DUPLEX=\(options.twoSided ? "manual" : "none")")
         // Sidecar first so it's in place when the PDF's arrival wakes the watcher.
         try (lines.joined(separator: "\n") + "\n")
             .write(to: spoolDirectory.appendingPathComponent("job-\(stamp).opts"), atomically: true, encoding: .utf8)
@@ -100,21 +105,18 @@ enum LaserJetPrinter {
     static func waitForOutcome(job: URL, startOffset: UInt64, timeout: TimeInterval = 120) -> Outcome {
         let deadline = Date().addingTimeInterval(timeout)
         var seenJob = false
-        var nothingSent = false
         while Date() < deadline {
             if let text = logText(from: startOffset) {
                 for line in text.split(separator: "\n") {
                     if line.contains(job.lastPathComponent) { seenJob = true }
                     if line.contains("no supported printer detected") { return .queuedNoPrinter }
                     guard seenJob else { continue }
-                    if line.contains("(sent 0)") || line.hasPrefix("sent 0/") { nothingSent = true }
                     if let range = line.range(of: "fwload exit ") {
                         let code = line[range.upperBound...].prefix { $0.isNumber }
                         return code == "0" ? .printed : .failed(
-                            "The printer didn't accept the job (code \(code)). Check that it's on and has paper. Details: \(watcherLog.path)",
-                            retryable: nothingSent)
+                            "The printer didn't accept the job (code \(code)), so nothing was printed. The job is saved: unplug and replug the printer (or turn it off and on), and you'll be asked whether to print it again. Details: \(watcherLog.path)")
                     }
-                    if line.contains("ERROR") { return .failed(String(line).trimmingCharacters(in: .whitespaces), retryable: false) }
+                    if line.contains("ERROR") { return .failed(String(line).trimmingCharacters(in: .whitespaces)) }
                 }
             }
             Thread.sleep(forTimeInterval: 0.5)
