@@ -123,13 +123,25 @@ struct LaserJetPrintSheet: View {
         .task {
             rotateBacks = LaserJetPrinter.rotatesBacks
             refreshQueue()
-            let found = await Task.detached { LaserJetPrinter.connectedDevice() }.value
-            device = found
-            portDisabled = found == nil && LaserJetPrinter.lastDeferWasPortDisabled()
-            if found != nil { status = LaserJetPrinter.lastLoggedStatus() }
+            await refreshDevice()
             checked = true
         }
-        .onReceive(queueTimer) { _ in refreshQueue() }
+        .onReceive(queueTimer) { _ in
+            refreshQueue()
+            // The printer can be plugged in, switched on or re-enumerated
+            // while the sheet is open: keep the status live instead of
+            // showing "not connected" from the moment the sheet opened.
+            Task { await refreshDevice() }
+        }
+    }
+
+    /// Re-detect the printer (cheap IOKit registry scan, off the main thread).
+    private func refreshDevice() async {
+        let found = await Task.detached { LaserJetPrinter.connectedDevice() }.value
+        let wasConnected = device != nil
+        device = found
+        portDisabled = found == nil && LaserJetPrinter.lastDeferWasPortDisabled()
+        if found != nil, !wasConnected || status == nil { status = LaserJetPrinter.lastLoggedStatus() }
     }
 
     // MARK: Layout & sides
