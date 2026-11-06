@@ -1812,12 +1812,12 @@ struct PDFPreviewView: NSViewRepresentable {
                 // minY landed blocks one full height below the drop point.
                 let content = NSRect(origin: newFrameOrigin, size: editor.frame.size)
                     .insetBy(dx: BlockEditorView.inset + 5, dy: BlockEditorView.inset)
-                let contentTopLeft = NSPoint(
-                    x: content.minX,
-                    y: self.isFlipped ? content.minY : content.maxY
-                )
-                let pagePoint = self.convert(contentTopLeft, to: page)
-                let origin = self.engineOrigin(fromPDFKitPoint: pagePoint, page: page)
+                // Convert the WHOLE dropped box and take its engine top-left:
+                // on a rotated page the visual top-left is a different corner
+                // of the page-space rect (a single point landed a block-height
+                // off).
+                let pageRect = self.convert(content, to: page)
+                let origin = self.engineOrigin(fromPDFKitRect: pageRect, page: page)
                 // Carry any typed changes along with the move, and close
                 // silently FIRST so resigning focus can't fire a commit or
                 // cancel that clears the active block before the move runs.
@@ -2386,24 +2386,13 @@ struct PDFPreviewView: NSViewRepresentable {
         }
 
         private func engineRectString(fromPDFKitRect rect: NSRect, page: PDFPage) -> String {
-            let bounds = page.bounds(for: .cropBox)
-            let x0 = rect.minX - bounds.minX
-            let x1 = rect.maxX - bounds.minX
-            let y0 = bounds.maxY - rect.maxY
-            let y1 = bounds.maxY - rect.minY
-            return "\(x0),\(y0),\(x1),\(y1)"
+            EngineCoordinates.string(EngineCoordinates.engineRect(fromPDFKit: rect, page: page))
         }
 
         /// Engine-space (top-origin) rect for a PDFKit page rect — the inverse
         /// of `pdfKitRect(fromEngineRect:page:)`.
         private func engineRect(fromPDFKitRect rect: NSRect, page: PDFPage) -> CGRect {
-            let bounds = page.bounds(for: .cropBox)
-            return CGRect(
-                x: rect.minX - bounds.minX,
-                y: bounds.maxY - rect.maxY,
-                width: rect.width,
-                height: rect.height
-            )
+            EngineCoordinates.engineRect(fromPDFKit: rect, page: page)
         }
 
         /// Engine-space rect for a resized editor frame (view coordinates),
@@ -2418,13 +2407,13 @@ struct PDFPreviewView: NSViewRepresentable {
         }
 
         private func engineOrigin(fromPDFKitRect rect: NSRect, page: PDFPage) -> (x: Double, y: Double) {
-            let bounds = page.bounds(for: .cropBox)
-            return (Double(rect.minX - bounds.minX), Double(bounds.maxY - rect.maxY))
+            let engine = EngineCoordinates.engineRect(fromPDFKit: rect, page: page)
+            return (Double(engine.minX), Double(engine.minY))
         }
 
         private func engineOrigin(fromPDFKitPoint point: NSPoint, page: PDFPage) -> (x: Double, y: Double) {
-            let bounds = page.bounds(for: .cropBox)
-            return (Double(point.x - bounds.minX), Double(bounds.maxY - point.y))
+            let engine = EngineCoordinates.enginePoint(fromPDFKit: point, page: page)
+            return (Double(engine.x), Double(engine.y))
         }
 
         private func pdfKitRect(fromEngineRect text: String, page: PDFPage) -> NSRect? {
@@ -2433,12 +2422,7 @@ struct PDFPreviewView: NSViewRepresentable {
         }
 
         private func pdfKitRect(fromEngineRect rect: NSRect, page: PDFPage) -> NSRect? {
-            let bounds = page.bounds(for: .cropBox)
-            let x0 = bounds.minX + rect.minX
-            let x1 = bounds.minX + rect.maxX
-            let y0 = bounds.maxY - rect.maxY
-            let y1 = bounds.maxY - rect.minY
-            return NSRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
+            EngineCoordinates.pdfKitRect(fromEngine: rect, page: page)
         }
 
         private func parseEngineRect(_ text: String) -> NSRect? {
@@ -2594,13 +2578,41 @@ struct PDFPreviewView: NSViewRepresentable {
     }
 
     private func engineRectString(fromPDFKitRect rect: NSRect, page: PDFPage) -> String {
-        let pageBounds = page.bounds(for: .cropBox)
-        let x0 = rect.minX - pageBounds.minX
-        let x1 = rect.maxX - pageBounds.minX
-        let y0 = pageBounds.maxY - rect.maxY
-        let y1 = pageBounds.maxY - rect.minY
-        return "\(x0),\(y0),\(x1),\(y1)"
+        EngineCoordinates.string(EngineCoordinates.engineRect(fromPDFKit: rect, page: page))
     }
+}
+
+/// Engine (PyMuPDF) page coordinates <-> PDFKit page coordinates.
+///
+/// PyMuPDF text and drawing coordinates are the UNROTATED crop box with a
+/// top-left origin; PDFKit page space is the unrotated crop box with a
+/// bottom-left origin. (/Rotate only affects display: verified against
+/// PDFKit selection bounds on 0/90/180/270 pages with and without a crop
+/// offset.) One place for the mapping, so every tool agrees.
+enum EngineCoordinates {
+    static func enginePoint(fromPDFKit point: CGPoint, page: PDFPage) -> CGPoint {
+        let b = page.bounds(for: .cropBox)
+        return CGPoint(x: point.x - b.minX, y: b.maxY - point.y)
+    }
+
+    static func pdfKitPoint(fromEngine point: CGPoint, page: PDFPage) -> CGPoint {
+        let b = page.bounds(for: .cropBox)
+        return CGPoint(x: b.minX + point.x, y: b.maxY - point.y)
+    }
+
+    static func engineRect(fromPDFKit rect: CGRect, page: PDFPage) -> CGRect {
+        let a = enginePoint(fromPDFKit: CGPoint(x: rect.minX, y: rect.minY), page: page)
+        let c = enginePoint(fromPDFKit: CGPoint(x: rect.maxX, y: rect.maxY), page: page)
+        return CGRect(x: min(a.x, c.x), y: min(a.y, c.y), width: abs(c.x - a.x), height: abs(c.y - a.y))
+    }
+
+    static func pdfKitRect(fromEngine rect: CGRect, page: PDFPage) -> CGRect {
+        let a = pdfKitPoint(fromEngine: CGPoint(x: rect.minX, y: rect.minY), page: page)
+        let c = pdfKitPoint(fromEngine: CGPoint(x: rect.maxX, y: rect.maxY), page: page)
+        return CGRect(x: min(a.x, c.x), y: min(a.y, c.y), width: abs(c.x - a.x), height: abs(c.y - a.y))
+    }
+
+    static func string(_ rect: CGRect) -> String { "\(rect.minX),\(rect.minY),\(rect.maxX),\(rect.maxY)" }
 }
 
 extension Color {

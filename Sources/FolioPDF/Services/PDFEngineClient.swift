@@ -239,10 +239,14 @@ final class PDFEngineClient {
         let command: EngineCommandResult
         /// nil when `--reflow` was not passed (or the reply had no `reflow`).
         let reflow: ReplaceBlockReflow?
+        /// Lines of the edited text that now sit on other text (the longer
+        /// paragraph's content below could not be moved). 0 = clean.
+        var overlaps: Int = 0
     }
 
     private struct ReplaceBlockReply: Decodable {
         let reflow: ReplaceBlockReflow?
+        let overlaps: Int?
     }
 
     @discardableResult
@@ -335,7 +339,7 @@ final class PDFEngineClient {
         // The edit itself already succeeded; an unreadable reflow report must
         // not turn it into a failure, so decoding is best-effort.
         let reply = try? JSONDecoder().decode(ReplaceBlockReply.self, from: Data(result.stdout.utf8))
-        return ReplaceBlockResult(command: result, reflow: reply?.reflow)
+        return ReplaceBlockResult(command: result, reflow: reply?.reflow, overlaps: reply?.overlaps ?? 0)
     }
 
     func blockBackground(input: URL, output: URL, page: Int, rect: String, colorHex: String) throws -> EngineCommandResult {

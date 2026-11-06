@@ -216,10 +216,23 @@ def plan_reflow(helpers: Any, page: Any, bare: Any, block_rect: Any, block_lines
     moved: list[Item] = []
     pending = list(below)
     changed = True
+    def same_row(a: Any, b: Any) -> bool:
+        overlap = min(a.y1, b.y1) - max(a.y0, b.y0)
+        shorter = min(a.height, b.height)
+        return overlap >= -0.6 if shorter < 1.5 else overlap >= 0.5 * shorter
+
     while changed:
         changed = False
         for item in list(pending):
-            if _overlaps_x(item.rect, x0, x1):
+            # Table cells TOUCH at shared edges (a rule split per column ends
+            # at x=418.5 where the next starts): an item abutting the moving
+            # range on the same row as something already moving belongs to
+            # the same table — moving only one side misaligned the rows.
+            touching = (
+                _x_overlap(item.rect.x0, item.rect.x1, x0, x1) > -2.0
+                and any(same_row(item.rect, other.rect) for other in moved)
+            )
+            if _overlaps_x(item.rect, x0, x1) or touching:
                 moved.append(item)
                 pending.remove(item)
                 x0, x1 = min(x0, item.rect.x0), max(x1, item.rect.x1)

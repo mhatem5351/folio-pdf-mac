@@ -181,13 +181,11 @@ final class CanvasImageEditor {
     }
 
     static func engineRect(fromPDFKitRect rect: NSRect, page: PDFPage) -> CGRect {
-        let bounds = page.bounds(for: .cropBox)
-        return CGRect(x: rect.minX - bounds.minX, y: bounds.maxY - rect.maxY, width: rect.width, height: rect.height)
+        EngineCoordinates.engineRect(fromPDFKit: rect, page: page)
     }
 
     static func pdfKitRect(fromEngineRect rect: CGRect, page: PDFPage) -> NSRect {
-        let bounds = page.bounds(for: .cropBox)
-        return NSRect(x: bounds.minX + rect.minX, y: bounds.maxY - rect.maxY, width: rect.width, height: rect.height)
+        EngineCoordinates.pdfKitRect(fromEngine: rect, page: page)
     }
 
     /// `flipped`: the superview's y grows downward, so the visual top edge is

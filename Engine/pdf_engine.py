@@ -1567,6 +1567,88 @@ def decompose_ligatures(text: str) -> str:
     return "".join(_LIGATURES.get(ch, ch) for ch in text)
 
 
+class Frame:
+    """Coordinates of a text block whose lines run along an axis direction d
+    (unrotated page space), turned so the text runs along +x — the minimal
+    edit logic then works unchanged. `angle` is insert_text's rotate value
+    that draws text in direction d (verified: (0,-1)->90, (-1,0)->180,
+    (0,1)->270), which is what makes text look upright on /Rotate pages."""
+
+    _MAPS = {
+        (1, 0): (0, lambda x, y: (x, y), lambda u, v: (u, v)),
+        (0, -1): (90, lambda x, y: (-y, x), lambda u, v: (v, -u)),
+        (-1, 0): (180, lambda x, y: (-x, -y), lambda u, v: (-u, -v)),
+        (0, 1): (270, lambda x, y: (y, -x), lambda u, v: (-v, u)),
+    }
+
+    def __init__(self, direction: tuple[int, int]):
+        self.angle, self._to, self._back = self._MAPS[direction]
+        self.identity = direction == (1, 0)
+
+    @classmethod
+    def for_lines(cls, lines: list[dict[str, Any]]) -> "Frame | None":
+        dirs = set()
+        for line in lines:
+            d = line.get("dir") or (1.0, 0.0)
+            snapped = (round(d[0]), round(d[1]))
+            if snapped not in cls._MAPS or abs(d[0] - snapped[0]) > 0.01 or abs(d[1] - snapped[1]) > 0.01:
+                return None
+            dirs.add(snapped)
+        return cls(dirs.pop()) if len(dirs) == 1 else None
+
+    def pt(self, p: Any) -> tuple[float, float]:
+        return self._to(float(p[0]), float(p[1]))
+
+    def back(self, x: float, y: float) -> tuple[float, float]:
+        return self._back(x, y)
+
+    def rect(self, r: Any) -> Any:
+        import fitz
+
+        a = self._to(float(r[0]), float(r[1]))
+        b = self._to(float(r[2]), float(r[3]))
+        return fitz.Rect(min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
+
+    def rect_back(self, r: Any) -> Any:
+        import fitz
+
+        a = self._back(float(r[0]), float(r[1]))
+        b = self._back(float(r[2]), float(r[3]))
+        return fitz.Rect(min(a[0], b[0]), min(a[1], b[1]), max(a[0], b[0]), max(a[1], b[1]))
+
+    def lines(self, lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Copies of the lines in this frame. Each char keeps its page-space
+        box/origin (for erasing) under _page_bbox/_page_origin."""
+        if self.identity:
+            return lines
+        out = []
+        for line in lines:
+            spans = []
+            for span in line.get("spans") or []:
+                chars = []
+                for ch in span.get("chars", []):
+                    copy = dict(ch)
+                    if ch.get("bbox") is not None:
+                        copy["bbox"] = tuple(self.rect(ch["bbox"]))
+                        copy["_page_bbox"] = ch["bbox"]
+                    if ch.get("origin") is not None:
+                        copy["origin"] = self.pt(ch["origin"])
+                        copy["_page_origin"] = ch["origin"]
+                    chars.append(copy)
+                span_copy = dict(span)
+                span_copy["chars"] = chars
+                if span.get("bbox") is not None:
+                    span_copy["bbox"] = tuple(self.rect(span["bbox"]))
+                spans.append(span_copy)
+            copy = dict(line)
+            copy["spans"] = spans
+            copy["bbox"] = list(self.rect(line["bbox"]))
+            copy["origin"] = self.pt(line["origin"]) if line.get("origin") else None
+            copy["dir"] = (1.0, 0.0)
+            out.append(copy)
+        return out
+
+
 def line_char_list(line: dict[str, Any]) -> list[dict[str, Any]] | None:
     """The line's glyphs in text order, each with its span (style). None when
     they don't spell the line's text exactly (RTL rows, repaired fonts)."""
@@ -1575,7 +1657,8 @@ def line_char_list(line: dict[str, Any]) -> list[dict[str, Any]] | None:
         for ch in span.get("chars", []):
             if ch.get("bbox") is None or ch.get("origin") is None:
                 return None
-            chars.append({"c": ch.get("c", ""), "bbox": ch["bbox"], "origin": ch["origin"], "span": span})
+            chars.append({"c": ch.get("c", ""), "bbox": ch["bbox"], "origin": ch["origin"], "span": span,
+                          "page_bbox": ch.get("_page_bbox", ch["bbox"])})
     if not chars or "".join(c["c"] for c in chars) != line.get("text"):
         return None
     return chars
@@ -1635,7 +1718,7 @@ def glyph_erase_rect(bbox: Any, baseline: float, size: float, foreign: list[Any]
     return fitz.Rect(x0, lo, x1, hi)
 
 
-def erase_glyphs(page: Any, targets: list[dict[str, Any]]) -> int:
+def erase_glyphs(page: Any, targets: list[dict[str, Any]], frame: "Frame | None" = None) -> int:
     """Remove exactly these glyphs. No white fill (shading, highlights and
     white-on-color text survive), no vector art removed (rules, underlines,
     table borders), links and font resources preserved."""
@@ -1643,14 +1726,18 @@ def erase_glyphs(page: Any, targets: list[dict[str, Any]]) -> int:
 
     if not targets:
         return 0
-    keys = {_glyph_key(t["bbox"]) for t in targets}
+    keys = {_glyph_key(t.get("page_bbox", t["bbox"])) for t in targets}
     foreign = [box for box in page_glyph_boxes(page) if _glyph_key(box) not in keys]
+    if frame is not None and not frame.identity:
+        # Work in the text's own frame (ascent band above its baseline), then
+        # map the rect back to the page.
+        foreign = [frame.rect(box) for box in foreign]
     rects = []
     for target in targets:
         size = float(target["span"].get("size") or 10.0)
         rect = glyph_erase_rect(target["bbox"], float(target["origin"][1]), size, foreign)
         if rect is not None:
-            rects.append(rect)
+            rects.append(frame.rect_back(rect) if frame is not None and not frame.identity else rect)
     reflow_module()._redact(page, rects, images=fitz.PDF_REDACT_IMAGE_NONE,
                             graphics=fitz.PDF_REDACT_LINE_ART_NONE,
                             text=fitz.PDF_REDACT_TEXT_REMOVE, preserve=True)
@@ -1762,7 +1849,8 @@ def _span_size(span: dict[str, Any]) -> float:
     return float(span.get("size") or 11.0)
 
 
-def _draw(page: Any, x: float, y: float, text: str, kwargs: dict[str, Any], size: float, color: Any) -> float:
+def _draw(page: Any, x: float, y: float, text: str, kwargs: dict[str, Any], size: float, color: Any,
+          frame: "Frame | None" = None) -> float:
     """Draw `text` at (x, baseline y). Spaces are not drawn as glyphs: words
     go at their exact positions and text extraction infers the spaces from
     the gaps. (Fonts mapping U+0020 and U+00A0 to one glyph otherwise came
@@ -1770,15 +1858,22 @@ def _draw(page: Any, x: float, y: float, text: str, kwargs: dict[str, Any], size
     insert = {"fontname": kwargs["fontname"]}
     if kwargs.get("fontfile"):
         insert["fontfile"] = kwargs["fontfile"]
+    if frame is not None and not frame.identity:
+        insert["rotate"] = frame.angle
+
+    def put(px: float, piece: str) -> None:
+        point = frame.back(px, y) if frame is not None and not frame.identity else (px, y)
+        page.insert_text(point, piece, fontsize=size, color=color, **insert)
+
     if " " not in text or _space_safe(kwargs):
-        page.insert_text((x, y), text, fontsize=size, color=color, **insert)
+        put(x, text)
         return replacement_text_length(text, kwargs, size)
     cursor = x
     for index, word in enumerate(text.split(" ")):
         if index:
             cursor += replacement_text_length(" ", kwargs, size)
         if word:
-            page.insert_text((cursor, y), word, fontsize=size, color=color, **insert)
+            put(cursor, word)
             cursor += replacement_text_length(word, kwargs, size)
     return cursor - x
 
@@ -1956,14 +2051,42 @@ def minimal_block_edit(doc: Any, page: Any, block_lines: list[dict[str, Any]], n
     express the edit (caller falls back to re-laying the block)."""
     import fitz
 
-    lines = sorted(block_lines, key=lambda line: (float(line["origin"][1]), float(line["origin"][0])))
+    # Text running along any axis (upright text on a /Rotate page runs
+    # vertically in page space) is handled in its own frame; slanted text
+    # falls back to the general path.
+    frame = Frame.for_lines(block_lines)
+    if frame is None:
+        return None
+    page_rect = frame.rect(page.rect)
+    lines = sorted(frame.lines(block_lines), key=lambda line: (float(line["origin"][1]), float(line["origin"][0])))
+    # Reading order = the order of the paragraph's own text (page order is
+    # reversed for upside-down text); duplicates are claimed in frame order.
+    wanted = (getattr(args, "original_text", None) or "").split("\n")
+    if len(wanted) == len(lines):
+        claimed: list[int] = []
+        for text in wanted:
+            index = next((i for i, line in enumerate(lines) if i not in claimed and line["text"] == text), None)
+            if index is None:
+                claimed = []
+                break
+            claimed.append(index)
+        if claimed:
+            lines = [lines[i] for i in claimed]
+    # Text order running AGAINST the frame (upside-down text is listed in
+    # page order, bottom line first): work in frame order and read the new
+    # text's lines in the same reversed order, so pitch and wrapping go the
+    # right way.
+    reverse = (len(lines) >= 2 and all(float(a["origin"][1]) > float(b["origin"][1]) + 0.5
+                                       for a, b in zip(lines, lines[1:])))
+    if reverse:
+        lines = lines[::-1]
     if any(line_char_list(line) is None for line in lines):
         return None
-    if any(line.get("dir") and (abs(line["dir"][0] - 1) > 0.01 or abs(line["dir"][1]) > 0.01) for line in lines):
-        return None  # rotated / vertical text: re-laid by the general path
     picker = FontPicker(doc, page, scratch_files)
     old_texts = [line["text"] for line in lines]
     new_lines = new_text.split("\n")
+    if reverse:
+        new_lines = new_lines[::-1]
     baselines = [float(line["origin"][1]) for line in lines]
     sizes = [_span_size(line_char_list(line)[0]["span"]) for line in lines]
     if len(lines) >= 2:
@@ -1978,10 +2101,10 @@ def minimal_block_edit(doc: Any, page: Any, block_lines: list[dict[str, Any]], n
     single = len(lines) == 1
     # Single-line text (a heading, a label) may grow to the right; a
     # paragraph wraps at its own column edge.
-    right_limit = (min(page.rect.x1 - 18, block_right + float(getattr(args, "expand", 0) or 0))
+    right_limit = (min(page_rect.x1 - 18, block_right + float(getattr(args, "expand", 0) or 0))
                    if single else block_right)
     if single:
-        foreign = [box for box in page_glyph_boxes(page)
+        foreign = [box for box in (frame.rect(b) for b in page_glyph_boxes(page))
                    if box.x0 > block_right + 0.5
                    and box.y1 > lines[0]["bbox"][1] + 0.5 and box.y0 < lines[0]["bbox"][3] - 0.5]
         if foreign:
@@ -1999,7 +2122,7 @@ def minimal_block_edit(doc: Any, page: Any, block_lines: list[dict[str, Any]], n
 
     # A right-aligned column value (an invoice amount) keeps its RIGHT edge:
     # growing from the left edge would push it out of its column.
-    if (single and len(new_lines) == 1 and new_text != old_texts[0] and new_text.strip()
+    if (frame.identity and single and len(new_lines) == 1 and new_text != old_texts[0] and new_text.strip()
             and float(rect.x0) > 0.55 * page.rect.width and len(new_text.strip()) <= 32
             and right_aligned_evidence(page, rect, old_texts[0])):
         chars = line_char_list(lines[0])
@@ -2125,7 +2248,7 @@ def minimal_block_edit(doc: Any, page: Any, block_lines: list[dict[str, Any]], n
     for index in range(len(lines) - t, len(lines)):
         # Below a line-count change the identical lines move by whole pitches;
         # otherwise they are replayed in place (reading order, see replay).
-        plan = plan_line_edit(lines[index], old_texts[index], picker, page.rect.x1, False,
+        plan = plan_line_edit(lines[index], old_texts[index], picker, page_rect.x1, False,
                               dy=dy if abs(dy) > 0.01 else 0.0, replay=True)
         if plan is None:
             return None
@@ -2139,7 +2262,7 @@ def minimal_block_edit(doc: Any, page: Any, block_lines: list[dict[str, Any]], n
     head_erase: list[dict[str, Any]] = []
     head_draw: list[tuple] = []
     for index in range(0, k):
-        plan = plan_line_edit(lines[index], old_texts[index], picker, page.rect.x1, False, replay=True)
+        plan = plan_line_edit(lines[index], old_texts[index], picker, page_rect.x1, False, replay=True)
         if plan is not None:
             head_erase.extend(plan["erase"])
             head_draw.extend(plan["draw"])
@@ -2147,15 +2270,80 @@ def minimal_block_edit(doc: Any, page: Any, block_lines: list[dict[str, Any]], n
     draw = head_draw + draw
 
     # Keep only the user's edit: erase, let reflow clear its region, draw.
-    erase_glyphs(page, erase)
+    erase_glyphs(page, erase, frame)
     render = render_rect or rect
     if before_render is not None:
         before_render(page, {"block_lines": block_lines, "render_rect": render})
     for x, y, text, kwargs, size, color in draw:
-        _draw(page, x, y, text, kwargs, size, color)
+        _draw(page, x, y, text, kwargs, size, color, frame)
     old_bottom = float(lines[-1]["bbox"][3])
+    if not frame.identity:
+        # Geometry is in the text's own frame: report no page-space growth
+        # (reflow does not run on turned text).
+        old_bottom = float(block_lines[-1]["bbox"][3]) if block_lines else 0.0
+        dy = 0.0
     return {"inserted": True, "block_lines": block_lines, "render_rect": render,
             "old_bottom": old_bottom, "new_bottom": old_bottom + dy, "minimal": True}
+
+
+def shift_lines_snapshot(doc: Any, page: Any, lines: list[dict[str, Any]], dy: float) -> None:
+    """Move whole lines vertically by `dy` WITHOUT re-typesetting them: their
+    exact content (any script, shaped glyphs, /ActualText) is copied from a
+    snapshot of the page and placed shifted — the same mechanism reflow uses
+    for the content below an edit."""
+    import fitz
+
+    if not lines or abs(dy) < 0.01:
+        return
+    rf = reflow_module()
+    region = fitz.Rect(lines[0]["bbox"])
+    for line in lines[1:]:
+        region |= fitz.Rect(line["bbox"])
+    region = (region + (-1.0, -0.5, 1.0, 0.5)) & page.rect
+    bare = rf.bare_copy(doc, page.number)
+    try:
+        snapshot = rf.build_snapshot(bare, region)
+        erase_lines(page, lines, bound=region)
+        page.show_pdf_page(region + (0, dy, 0, dy), snapshot, 0, clip=region,
+                           keep_proportion=False, overlay=True)
+    finally:
+        bare.close()
+
+
+def rtl_delete_lines(doc: Any, page: Any, block_lines: list[dict[str, Any]], new_lines: list[str],
+                     render_rect: Any, before_render: Any = None) -> dict[str, Any] | None:
+    """Right-to-left paragraph where the user only DELETED whole lines: erase
+    those lines and move the ones below up by whole line pitches, exactly as
+    they are (re-shaping the paragraph drifted it). None if it isn't a pure
+    deletion."""
+    lines = sorted(block_lines, key=lambda l: float(l["origin"][1]) if l.get("origin") else float(l["bbox"][1]))
+    old = [l["text"] for l in lines]
+    if len(new_lines) >= len(old):
+        return None
+    kept, j = [], 0
+    for i, text in enumerate(old):
+        if j < len(new_lines) and text == new_lines[j]:
+            kept.append(i)
+            j += 1
+    if j != len(new_lines):
+        return None
+    deleted = [i for i in range(len(old)) if i not in kept]
+    baselines = [float(l["origin"][1]) if l.get("origin") else float(l["bbox"][3]) for l in lines]
+    gaps = [b - a for a, b in zip(baselines, baselines[1:]) if b - a > 0.5]
+    pitch = _median(gaps) if gaps else float(lines[0].get("fontsize") or 11) * 1.2
+    erase_lines(page, [lines[i] for i in deleted], bound=None)
+    if before_render is not None:
+        before_render(page, {"block_lines": block_lines, "render_rect": render_rect})
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for i in kept:
+        above = sum(1 for d in deleted if d < i)
+        if above:
+            groups.setdefault(above, []).append(lines[i])
+    for above, group in groups.items():
+        shift_lines_snapshot(doc, page, group, -above * pitch)
+    bottom = max(float(l["bbox"][3]) for l in lines)
+    return {"inserted": True, "block_lines": block_lines, "render_rect": render_rect,
+            "old_bottom": bottom, "new_bottom": bottom - len(deleted) * pitch, "minimal": True}
 
 
 _AMOUNT = re.compile(r"^[\s$€£¥₹%()+\-–—.,:/0-9A-Za-z]*\d[\s$€£¥₹%()+\-–—.,:/0-9A-Za-z]*$")
@@ -2235,6 +2423,19 @@ def apply_block_edit(doc: Any, page: Any, args: argparse.Namespace, rect: Any, s
         and natural_align(args) and not color_runs and not getattr(args, "background", None)
         and not text_has_rtl(new_text) and not text_has_rtl(original)
     )
+    rtl_plain = (
+        complete and block_lines and not resized
+        and not args.font_size and not args.color and not args.bold and not args.font
+        and not getattr(args, "italic", False) and not getattr(args, "underline", False)
+        and not getattr(args, "no_bold", False) and not getattr(args, "no_italic", False)
+        and natural_align(args) and not color_runs and not getattr(args, "background", None)
+        and (text_has_rtl(new_text) or text_has_rtl(original))
+    )
+    if rtl_plain and len(new_text.split("\n")) < len(block_lines):
+        deletion = rtl_delete_lines(doc, page, block_lines, new_text.split("\n"), render_rect, before_render)
+        if deletion is not None:
+            return deletion
+
     if plain_edit:
         minimal = minimal_block_edit(doc, page, block_lines, new_text, rect, args, scratch_files,
                                      before_render=before_render, render_rect=render_rect)
@@ -2248,6 +2449,17 @@ def apply_block_edit(doc: Any, page: Any, args: argparse.Namespace, rect: Any, s
                 annot.set_info(title="Tracked change", content=f"Original text:\n{snippet}")
                 annot.update()
             return minimal
+
+    # Turned text (upright text on a /Rotate page runs vertically in page
+    # space) is only handled by the frame-aware minimal path above; the
+    # general renderer below would draw it in the wrong direction.
+    if block_lines and not text_has_rtl(new_text) and not text_has_rtl(original):
+        turned = Frame.for_lines(block_lines)
+        if turned is None or not turned.identity:
+            raise EditTargetMissing(
+                "Style changes on turned text (e.g. on a rotated page) aren't supported yet — "
+                "edit the words only, or rotate the page upright first."
+            )
 
     # When the edited text has the same number of lines as the block, render
     # line-by-line at each line's own origin and style — indents and
@@ -2414,6 +2626,32 @@ def apply_block_edit(doc: Any, page: Any, args: argparse.Namespace, rect: Any, s
     return {"inserted": inserted, "block_lines": block_lines, "render_rect": render_rect}
 
 
+def edit_overlaps(input_path: str, output_path: str, pno: int) -> int:
+    """How many lines of the edited text now sit ON other text (a longer
+    paragraph whose content below could not be moved). New lines are those
+    absent before; replayed lines match exactly and don't count. A real
+    overlap covers over half a row's height (tight leading overlaps less)."""
+    import fitz
+    from collections import Counter
+
+    keys = reflow_module()._line_keys
+    with fitz.open(input_path) as before_doc, fitz.open(output_path) as after_doc:
+        before = Counter(keys(before_doc[pno]))
+        after = Counter(keys(after_doc[pno]))
+    new = [fitz.Rect(bbox) for (_t, bbox), _n in (after - before).items()]
+    kept = [fitz.Rect(bbox) for (_t, bbox), _n in (after & before).items()]
+    hits = 0
+    for box in new:
+        for other in kept:
+            inter = box & other
+            if inter.is_empty or inter.width < 2:
+                continue
+            if inter.height > 0.5 * min(box.height, other.height):
+                hits += 1
+                break
+    return hits
+
+
 def cmd_replace_block(args: argparse.Namespace) -> int:
     """Replace an entire text block: redact its area, re-render the new text
     with the block's own style (or explicit overrides), wrapping inside the
@@ -2458,6 +2696,12 @@ def cmd_replace_block(args: argparse.Namespace) -> int:
                 pass
     if new_text.strip() and not inserted:
         return respond(False, message="replacement text did not fit")
+    try:
+        overlapping = edit_overlaps(args.input, str(output), args.page - 1)
+    except Exception:
+        overlapping = 0
+    if overlapping:
+        extra["overlaps"] = overlapping
     return respond(True, output=str(output), inserted=inserted, **extra)
 
 

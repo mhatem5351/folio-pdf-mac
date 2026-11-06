@@ -1049,17 +1049,12 @@ final class AppStore: ObservableObject {
         guard let page = selection.pages.first, let document else { return nil }
         let pageIndex = document.index(for: page)
         guard pageIndex != NSNotFound else { return nil }
-        let bounds = page.bounds(for: .cropBox)
         var parts: [String] = []
         for line in selection.selectionsByLine() {
             guard let linePage = line.pages.first, linePage === page else { continue }
             let rect = line.bounds(for: page)
             guard rect.width > 0.5, rect.height > 0.5 else { continue }
-            let x0 = rect.minX - bounds.minX
-            let x1 = rect.maxX - bounds.minX
-            let y0 = bounds.maxY - rect.maxY
-            let y1 = bounds.maxY - rect.minY
-            parts.append("\(x0),\(y0),\(x1),\(y1)")
+            parts.append(EngineCoordinates.string(EngineCoordinates.engineRect(fromPDFKit: rect, page: page)))
         }
         guard !parts.isEmpty else { return nil }
         return (pageIndex + 1, parts.joined(separator: ";"))
@@ -1310,13 +1305,6 @@ final class AppStore: ObservableObject {
 
     private func openBlock(from blocks: [PDFEngineClient.EngineBlockPayload], page: Int, x: Double, y: Double) {
         guard selectedOperation == .edit, selectedEditTool == .contentText, !busy else { return }
-        // On a /Rotate page the editor overlay and move math aren't mapped
-        // through the rotation yet: the box would sit sideways and a drop
-        // would land a block-height off. Refuse rather than misplace text.
-        if let pdfPage = document?.page(at: page - 1), ((pdfPage.rotation % 360) + 360) % 360 != 0 {
-            toast("Text on rotated pages can't be edited yet — rotate the page upright first")
-            return
-        }
         // A click INSIDE several blocks (a heading box overlapping a column)
         // picks the smallest, like the engine's own block-at; a click near but
         // outside text picks the nearest block within 8pt. Anything further is
@@ -1492,7 +1480,17 @@ final class AppStore: ObservableObject {
             let reflow = reflowBox.value
             // runEngineOp has just toasted the title; this replaces it. The
             // edit itself succeeded, so this is informational, not an error.
-            if reflow?.skippedForOverflow == true {
+            if reflowBox.overlaps > 0 {
+                // Never leave an overlap unexplained: say why and how to undo.
+                let why: String
+                switch reflow?.reason {
+                case "overflow": why = "moving it down would run off the page"
+                case "straddles", "spans_columns": why = "what's below spans other columns or boxes"
+                case .none where !reflowBelow: why = "\"Reflow text below\" is off"
+                default: why = "it couldn't be moved down"
+                }
+                self.toast("Edited — the longer text overlaps what's below (\(why)). Press ⌘Z to undo, or shorten it.")
+            } else if reflow?.skippedForOverflow == true {
                 self.toast("Edited — text below wasn't moved because it would run off the page")
             }
             guard let displaced else { return }
@@ -1514,7 +1512,7 @@ final class AppStore: ObservableObject {
             // (if it is still there), else keep the text on the clipboard.
             self?.restoreDraft(after: error, block: block, text: newText)
         }) { [engine] input, output in
-            reflowBox.value = try engine.replaceBlock(
+            let result = try engine.replaceBlock(
                 input: input,
                 output: output,
                 page: block.page,
@@ -1536,7 +1534,9 @@ final class AppStore: ObservableObject {
                 colorRunsJSON: colorRunsJSON,
                 renderRect: block.resizedEngineRectString,
                 reflow: reflowBelow
-            ).reflow
+            )
+            reflowBox.value = result.reflow
+            reflowBox.overlaps = result.overlaps
         }
     }
 
@@ -2533,4 +2533,5 @@ final class AppStore: ObservableObject {
 /// `onDone`.
 private final class ReflowResultBox: @unchecked Sendable {
     var value: PDFEngineClient.ReplaceBlockReflow?
+    var overlaps = 0
 }
