@@ -216,6 +216,12 @@ struct PDFPreviewView: NSViewRepresentable {
         }
 
         override func keyDown(with event: NSEvent) {
+            // While an input method is composing (Arabic/Japanese/… IME,
+            // dead keys), Escape and Return belong to the composition.
+            if hasMarkedText() {
+                super.keyDown(with: event)
+                return
+            }
             if event.keyCode == 53 { // Escape
                 finish(commit: false)
                 return
@@ -228,11 +234,21 @@ struct PDFPreviewView: NSViewRepresentable {
             super.keyDown(with: event)
         }
 
+        /// Ctrl-Return / Option-Return insert U+2028 (a line SEPARATOR) by
+        /// default, which the engine can't render; make it a plain newline.
+        override func insertLineBreak(_ sender: Any?) {
+            insertNewline(sender)
+        }
+
         /// Escape delivered as AppKit's cancel ACTION rather than a raw key
         /// press (the route taken whenever something upstream — a Cancel key
         /// equivalent, `interpretKeyEvents`, the responder chain — converts it
         /// before `keyDown` runs). Cancels, never commits.
         override func cancelOperation(_ sender: Any?) {
+            if hasMarkedText() {
+                super.cancelOperation(sender)
+                return
+            }
             finish(commit: false)
         }
 
@@ -315,8 +331,21 @@ struct PDFPreviewView: NSViewRepresentable {
         /// Fires when a handle drag finishes, so the owner can remember the new
         /// geometry (scroll/zoom repositioning must not undo the resize).
         var onResized: (() -> Void)?
+        /// Per-word colours: the paragraph colour the text was painted with,
+        /// and how many of the store's runs are already painted. Runs typed
+        /// around are then read back from the text storage, where they move
+        /// with the text.
+        var baseColorHex: String = "#000000"
+        var appliedRunCount = 0
         private var activeHandle: ResizeHandle?
         private var resizeStartFrame: NSRect = .zero
+        /// A handle press only becomes a resize after the mouse travels a few
+        /// points: the size clamps below would otherwise reshape the box on a
+        /// zero-distance "drag", and the commit would re-wrap the paragraph.
+        private var resizeArmed = false
+        /// The frame before the first handle drag. A resize counts only when
+        /// the box ends up measurably different from it.
+        private var preResizeFrame: NSRect?
         var isResizing: Bool { activeHandle != nil }
         /// Given a proposed frame, returns a (possibly snapped) origin.
         var snapProvider: ((NSRect) -> NSPoint)?
@@ -569,7 +598,10 @@ struct PDFPreviewView: NSViewRepresentable {
             guard new != frame else { return }
             frame = new
             layoutTextView()
-            didResize = true
+            // Only a real change of the box counts (1pt tolerance per edge).
+            let reference = preResizeFrame ?? start
+            didResize = abs(new.minX - reference.minX) > 1 || abs(new.maxX - reference.maxX) > 1
+                || abs(new.minY - reference.minY) > 1 || abs(new.maxY - reference.maxY) > 1
             // A narrower box needs more lines: let the frame follow the text
             // down, exactly as it does while typing.
             growToFitText()
@@ -580,9 +612,13 @@ struct PDFPreviewView: NSViewRepresentable {
         /// re-wraps live (the container tracks the view's width).
         private func layoutTextView() {
             let height = max(16, frame.height - Self.inset * 2)
+            // The frame is widened by inset + 5 on each side and the text view
+            // has no line-fragment padding, so the text must start at inset + 5
+            // to sit exactly over the paragraph; the extra 5pt stays on the
+            // right as headroom against font-metric re-wrapping.
             textView.frame = NSRect(
-                x: Self.inset, y: Self.inset,
-                width: max(20, frame.width - Self.inset * 2),
+                x: Self.inset + 5, y: Self.inset,
+                width: max(20, frame.width - Self.inset * 2 - 5),
                 height: height
             )
             // A vertically resizable text view shrinks to its text; keep it at
@@ -632,6 +668,8 @@ struct PDFPreviewView: NSViewRepresentable {
                 // down — mid-drag. Mouse tracking stays with this view anyway.
                 activeHandle = handle
                 resizeStartFrame = frame
+                resizeArmed = false
+                if preResizeFrame == nil { preResizeFrame = frame }
                 dragStartMouse = superview?.convert(event.locationInWindow, from: nil)
                 handle.cursor.set()
                 return
@@ -652,7 +690,12 @@ struct PDFPreviewView: NSViewRepresentable {
             if let handle = activeHandle {
                 guard let start = dragStartMouse,
                       let current = superview?.convert(event.locationInWindow, from: nil) else { return }
-                applyResize(handle, delta: NSPoint(x: current.x - start.x, y: current.y - start.y))
+                let delta = NSPoint(x: current.x - start.x, y: current.y - start.y)
+                if !resizeArmed {
+                    guard hypot(delta.x, delta.y) >= 3 else { return }
+                    resizeArmed = true
+                }
+                applyResize(handle, delta: delta)
                 handle.cursor.set()
                 return
             }
@@ -662,11 +705,15 @@ struct PDFPreviewView: NSViewRepresentable {
                   let current = superview?.convert(event.locationInWindow, from: nil) else { return }
             let dx = current.x - start.x
             let dy = current.y - start.y
-            if abs(dx) + abs(dy) > 2 {
+            // A sloppy click must not move the block: 5pt of travel first.
+            if abs(dx) + abs(dy) > 5 {
                 didDrag = true
             }
             let proposed = NSPoint(x: origin.x + dx, y: origin.y + dy)
-            if didDrag, let snapProvider {
+            // Dragging back near where it started snaps home (no move).
+            if didDrag, hypot(dx, dy) < 4 {
+                setFrameOrigin(origin)
+            } else if didDrag, let snapProvider {
                 setFrameOrigin(snapProvider(NSRect(origin: proposed, size: frame.size)))
             } else {
                 setFrameOrigin(proposed)
@@ -695,6 +742,10 @@ struct PDFPreviewView: NSViewRepresentable {
             }
             onDragEnded?()
             editorLog.info("editor mouseUp didDrag=\(self.didDrag) origin=(\(self.frame.origin.x), \(self.frame.origin.y))")
+            if didDrag, let origin = dragStartOrigin,
+               hypot(frame.origin.x - origin.x, frame.origin.y - origin.y) < 1 {
+                didDrag = false     // dropped where it started: not a move
+            }
             if didDrag {
                 onMoved?(frame.origin)
             } else if phase == .selected && editOnClick {
@@ -1055,6 +1106,15 @@ struct PDFPreviewView: NSViewRepresentable {
         private func repositionBlockEditor() {
             guard let editor = blockEditor, !editor.isDragging, !editor.isResizing else { return }
             guard let page = document?.page(at: activeBlockPageIndex) else { return }
+            // Zoom changed: re-scale the editor's font and line pitch too, or
+            // its wrapping (and the fitted height) no longer match the page.
+            if let block = liveActiveBlock?() {
+                let font = Self.editorFont(for: block, scale: scaleFactor)
+                if abs((editor.textView.font?.pointSize ?? 0) - font.pointSize) > 0.01 {
+                    editor.textView.font = font
+                    Self.applyLineHeight(editor.textView, block: block, scale: scaleFactor)
+                }
+            }
             // A resized frame is re-anchored from the box the user dragged out,
             // never from the paragraph's original rect — scrolling or zooming
             // must not silently undo the resize.
@@ -1066,9 +1126,16 @@ struct PDFPreviewView: NSViewRepresentable {
             guard let pdfKit = pdfKitRect(fromEngineRect: engineRect, page: page) else { return }
             var viewRect = convert(pdfKit, from: page)
                 .insetBy(dx: -(BlockEditorView.inset + 5), dy: -BlockEditorView.inset)
-            // Keep any extra height the editor grew to fit typed text.
+            // Keep any extra height the editor grew to fit typed text. The view
+            // is bottom-origin, so the TOP edge stays where the paragraph
+            // starts and the extra height extends downward (growing the size
+            // alone would push the box up and commit the text higher).
             if editor.phase == .editing && editor.frame.height > viewRect.height {
+                let top = viewRect.maxY
                 viewRect.size.height = editor.frame.height
+                if !(editor.superview?.isFlipped ?? true) {
+                    viewRect.origin.y = top - viewRect.height
+                }
             }
             if editor.frame != viewRect {
                 editorLog.info("repositionBlockEditor \(editor.frame.debugDescription) -> \(viewRect.debugDescription)")
@@ -1481,6 +1548,30 @@ struct PDFPreviewView: NSViewRepresentable {
 
         // MARK: Escape
 
+        /// Apply — never discard — whatever is typed in the open editors.
+        /// Called before undo/redo, save and document swaps so typing is not
+        /// lost. Returns true when an editor was open.
+        @discardableResult
+        func commitLiveEditors() -> Bool {
+            let hadEditor = blockEditor != nil || newTextEditor != nil
+            blockEditor?.textView.finish(commit: true)
+            newTextEditor?.textView.finish(commit: true)
+            return hadEditor
+        }
+
+        /// True when an open editor holds typing (or a resize) not yet applied.
+        var liveEditorHasChanges: Bool {
+            if let editor = blockEditor, let block = liveActiveBlock?() {
+                let typed = ActiveTextBlock.normalizedLineBreaks(editor.textView.string)
+                if typed != block.originalText || editor.didResize { return true }
+            }
+            if let editor = newTextEditor,
+               !editor.textView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return true
+            }
+            return false
+        }
+
         /// Abandon any live block edit or new-text draft WITHOUT committing.
         /// The single place Escape lands, whatever route it arrives by (the
         /// editor's keyDown/cancelOperation, this view's keyDown, the SwiftUI
@@ -1531,6 +1622,13 @@ struct PDFPreviewView: NSViewRepresentable {
             editorLog.info("escapeMonitor installed")
             escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard let self, event.keyCode == 53 else { return event }
+                // Escape in another window (a sheet, the colour panel) is not
+                // ours; and during input-method composition it cancels the
+                // composition, not the edit.
+                guard event.window === self.window else { return event }
+                if let textView = self.window?.firstResponder as? NSTextView, textView.hasMarkedText() {
+                    return event
+                }
                 editorLog.info("escapeMonitor keyDown 53 windowMatch=\(event.window === self.window) editors=\(self.blockEditor != nil || self.newTextEditor != nil)")
                 guard self.blockEditor != nil || self.newTextEditor != nil else { return event }
                 self.cancelLiveEditors()
@@ -1601,6 +1699,11 @@ struct PDFPreviewView: NSViewRepresentable {
             let block = liveActiveBlock != nil ? liveActiveBlock!() : snapshot
             guard let block else {
                 lastSyncedBlockKey = nil
+                // The selection went away underneath the editor (tool switch,
+                // undo, document swap): APPLY what was typed, never drop it.
+                // finish() is a no-op if the editor already committed or
+                // cancelled; the store ignores an unchanged commit.
+                blockEditor?.textView.finish(commit: true)
                 blockEditor?.removeFromSuperview()
                 blockEditor = nil
                 return
@@ -1615,8 +1718,14 @@ struct PDFPreviewView: NSViewRepresentable {
                     editor.textView.font = Self.editorFont(for: block, scale: scaleFactor)
                     editor.textView.textColor = NSColor(engineHex: block.colorHex) ?? .black
                     Self.applyUnderline(editor.textView, block.underline)
-                    // Overlay per-word color spans on top of the base color.
-                    Self.applyColorRuns(editor.textView, base: NSColor(engineHex: block.colorHex) ?? .black, runs: block.colorRuns)
+                    // Overlay per-word color spans on top of the base color:
+                    // runs already painted are read back from the text (they
+                    // moved with any typing), plus any run just added.
+                    let live = Self.liveColorRuns(editor.textView, baseHex: editor.baseColorHex)
+                    let fresh = Array(block.colorRuns.dropFirst(min(editor.appliedRunCount, block.colorRuns.count)))
+                    Self.applyColorRuns(editor.textView, base: NSColor(engineHex: block.colorHex) ?? .black, runs: live + fresh)
+                    editor.baseColorHex = block.colorHex
+                    editor.appliedRunCount = block.colorRuns.count
                     // Preview the chosen background (white cover when none).
                     editor.textView.backgroundColor = block.backgroundHex
                         .flatMap { NSColor(engineHex: $0) } ?? .white
@@ -1645,7 +1754,7 @@ struct PDFPreviewView: NSViewRepresentable {
             editorLog.info("syncBlockEditor OPEN rect=\(block.engineRectString) text=\(String(block.originalText.prefix(30)))")
             let editor = BlockEditorView(
                 frame: viewRect,
-                text: block.originalText,
+                text: block.initialText ?? block.originalText,
                 font: Self.editorFont(for: block, scale: scaleFactor),
                 textColor: NSColor(engineHex: block.colorHex) ?? .black
             )
@@ -1654,6 +1763,9 @@ struct PDFPreviewView: NSViewRepresentable {
             }
             Self.applyUnderline(editor.textView, block.underline)
             Self.applyColorRuns(editor.textView, base: NSColor(engineHex: block.colorHex) ?? .black, runs: block.colorRuns)
+            editor.baseColorHex = block.colorHex
+            editor.appliedRunCount = block.colorRuns.count
+            Self.applyLineHeight(editor.textView, block: block, scale: scaleFactor)
             // Bridge the AppKit text selection up to the store so a Text Color
             // tap can recolor just the selected words.
             editor.textView.onSelectionChanged = { [weak self] range, length in
@@ -1671,6 +1783,12 @@ struct PDFPreviewView: NSViewRepresentable {
                 // handle means the replacement reflows into that box, not the
                 // paragraph's original rect.
                 var payload = block
+                if let editor {
+                    // Per-word colours as they sit in the text NOW (typing
+                    // shifts them; the store's recorded offsets don't move).
+                    payload.colorRuns = Self.liveColorRuns(editor.textView, baseHex: editor.baseColorHex)
+                    payload.colorRunsFromEditor = true
+                }
                 if let editor, let resized = self.resizedEngineRect(for: editor, page: page) {
                     payload.resizedEngineRect = resized
                     editorLog.info("commit with resized rect \(resized.debugDescription)")
@@ -1752,6 +1870,7 @@ struct PDFPreviewView: NSViewRepresentable {
             // the commit renders into the box the user dragged out.
             editor.resizable = true
 
+            newTextEditor?.textView.finish(commit: true)
             removeNewTextEditorView()
             addSubview(editor)
             blockEditor = editor
@@ -1786,9 +1905,11 @@ struct PDFPreviewView: NSViewRepresentable {
             // Prefer the store's current value over the render snapshot.
             let draft = liveNewTextDraft != nil ? liveNewTextDraft!() : snapshot
             guard let draft else {
+                newTextEditor?.textView.finish(commit: true)
                 removeNewTextEditorView()
                 return
             }
+            blockEditor?.textView.finish(commit: true)
             removeBlockEditorView()
             // Shares lastSyncedBlockKey with the block editor; the "new-" prefix
             // keeps the two keyspaces distinct.
@@ -1982,9 +2103,53 @@ struct PDFPreviewView: NSViewRepresentable {
             }
         }
 
+        /// Match the paragraph's own line pitch (multi-line blocks), so the
+        /// editor shows lines where the page has them. Keeps the existing
+        /// paragraph style's alignment / writing direction.
+        static func applyLineHeight(_ textView: NSTextView, block: ActiveTextBlock, scale: CGFloat) {
+            guard block.originalText.contains("\n"), block.lineHeight > 0 else { return }
+            let height = CGFloat(block.lineHeight) * scale
+            guard height >= CGFloat(block.fontSize) * scale * 0.9 else { return }
+            let current = (textView.textStorage?.length ?? 0) > 0
+                ? textView.textStorage?.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle
+                : nil
+            let style = ((current ?? textView.defaultParagraphStyle)?.mutableCopy() as? NSMutableParagraphStyle)
+                ?? NSMutableParagraphStyle()
+            style.minimumLineHeight = height
+            style.maximumLineHeight = height
+            textView.defaultParagraphStyle = style
+            var typing = textView.typingAttributes
+            typing[.paragraphStyle] = style
+            textView.typingAttributes = typing
+            if let storage = textView.textStorage, storage.length > 0 {
+                storage.addAttribute(.paragraphStyle, value: style, range: NSRange(location: 0, length: storage.length))
+            }
+        }
+
         static func editorFont(for block: ActiveTextBlock, scale: CGFloat) -> NSFont {
             resolveFont(block.fontFamily ?? block.fontName,
                         size: max(6, block.fontSize * Double(scale)), bold: block.bold, italic: block.italic)
+        }
+
+        /// The editor's per-word colours read back from its text storage, as
+        /// UTF-16 runs. Ranges in the paragraph's base colour are skipped.
+        static func liveColorRuns(_ textView: NSTextView, baseHex: String) -> [ColorRun] {
+            guard let storage = textView.textStorage, storage.length > 0 else { return [] }
+            let base = NSColor(engineHex: baseHex)?.usingColorSpace(.sRGB)
+            var runs: [ColorRun] = []
+            storage.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+                guard let color = (value as? NSColor)?.usingColorSpace(.sRGB) else { return }
+                if let base,
+                   abs(color.redComponent - base.redComponent) < 0.004,
+                   abs(color.greenComponent - base.greenComponent) < 0.004,
+                   abs(color.blueComponent - base.blueComponent) < 0.004 { return }
+                let hex = String(format: "#%02x%02x%02x",
+                                 Int(round(color.redComponent * 255)),
+                                 Int(round(color.greenComponent * 255)),
+                                 Int(round(color.blueComponent * 255)))
+                runs.append(ColorRun(start: range.location, length: range.length, hex: hex))
+            }
+            return runs
         }
 
         /// Live-preview per-word text color: paint the whole text the base

@@ -9,18 +9,46 @@ enum PDFEngineError: LocalizedError {
     case missingEngine(String)
     case commandFailed(command: String, status: Int32, stdout: String, stderr: String)
     case invalidOutput(String)
+    case timedOut(String)
 
     var errorDescription: String? {
         switch self {
         case .missingEngine(let message):
             return message
-        case .commandFailed(let command, let status, let stdout, let stderr):
-            let details = [stdout, stderr].filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.joined(separator: "\n")
-            return "\(command) failed with status \(status)\n\(details)"
+        case .commandFailed(_, let status, let stdout, let stderr):
+            // The user needs the engine's own explanation, not the command
+            // line: prefer the JSON reply's "message", then the last stderr
+            // line (argparse / Python error), then a generic status.
+            if let data = stdout.data(using: .utf8),
+               let reply = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let message = reply["message"] as? String, !message.isEmpty {
+                return message
+            }
+            if let line = stderr.split(separator: "\n").last(where: {
+                !$0.trimmingCharacters(in: .whitespaces).isEmpty
+            }) {
+                return String(line)
+            }
+            return "The PDF engine stopped with status \(status)."
         case .invalidOutput(let message):
+            return message
+        case .timedOut(let message):
             return message
         }
     }
+
+    /// Full diagnostic text (command, status, output) for logs.
+    var diagnostics: String {
+        if case .commandFailed(let command, let status, let stdout, let stderr) = self {
+            return "\(command) failed with status \(status)\n\(stdout)\n\(stderr)"
+        }
+        return errorDescription ?? ""
+    }
+}
+
+/// Set by the engine watchdog when it had to stop a hung command.
+private final class TimeoutFlag: @unchecked Sendable {
+    var fired = false
 }
 
 final class PDFEngineClient {
@@ -229,6 +257,9 @@ final class PDFEngineClient {
         colorHex: String? = nil,
         bold: Bool = false,
         italic: Bool = false,
+        /// Turn bold / italic OFF on text whose own font is bold / italic.
+        noBold: Bool = false,
+        noItalic: Bool = false,
         underline: Bool = false,
         alignment: String = "auto",
         background: String? = nil,
@@ -249,8 +280,8 @@ final class PDFEngineClient {
             "--input", input.path,
             "--output", output.path,
             "--page", String(page),
-            "--rect", rect,
-            "--text", text
+            "--rect=\(rect)",
+            "--text=\(text)"
         ]
         if fontSize > 0 {
             args.append(contentsOf: ["--font-size", String(fontSize)])
@@ -267,6 +298,12 @@ final class PDFEngineClient {
         if italic {
             args.append("--italic")
         }
+        if noBold {
+            args.append("--no-bold")
+        }
+        if noItalic {
+            args.append("--no-italic")
+        }
         if underline {
             args.append("--underline")
         }
@@ -280,16 +317,16 @@ final class PDFEngineClient {
             args.append(contentsOf: ["--line-height", String(lineHeight)])
         }
         if let trackOriginal, !trackOriginal.isEmpty {
-            args.append(contentsOf: ["--track-original", trackOriginal])
+            args.append(contentsOf: ["--track-original=\(trackOriginal)"])
         }
         if let originalText, !originalText.isEmpty {
-            args.append(contentsOf: ["--original-text", originalText])
+            args.append(contentsOf: ["--original-text=\(originalText)"])
         }
         if let colorRunsJSON, !colorRunsJSON.isEmpty {
             args.append(contentsOf: ["--color-runs", colorRunsJSON])
         }
         if let renderRect, !renderRect.isEmpty {
-            args.append(contentsOf: ["--render-rect", renderRect])
+            args.append(contentsOf: ["--render-rect=\(renderRect)"])
         }
         if reflow {
             args.append("--reflow")
@@ -307,7 +344,7 @@ final class PDFEngineClient {
             "--input", input.path,
             "--output", output.path,
             "--page", String(page),
-            "--rect", rect,
+            "--rect=\(rect)",
             "--color", colorHex
         ])
     }
@@ -317,7 +354,7 @@ final class PDFEngineClient {
             "set-password",
             "--input", input.path,
             "--output", output.path,
-            "--password", password
+            "--password=\(password)"
         ])
     }
 
@@ -385,13 +422,13 @@ final class PDFEngineClient {
             "--kind", kind
         ]
         if let rects, !rects.isEmpty {
-            args.append(contentsOf: ["--rects", rects])
+            args.append(contentsOf: ["--rects=\(rects)"])
         }
         if x != 0 || y != 0 {
             args.append(contentsOf: ["--x", String(x), "--y", String(y)])
         }
         if let note, !note.isEmpty {
-            args.append(contentsOf: ["--note", note])
+            args.append(contentsOf: ["--note=\(note)"])
         }
         return try run(args)
     }
@@ -409,6 +446,9 @@ final class PDFEngineClient {
         colorHex: String? = nil,
         bold: Bool = false,
         italic: Bool = false,
+        /// Turn bold / italic OFF on text whose own font is bold / italic.
+        noBold: Bool = false,
+        noItalic: Bool = false,
         underline: Bool = false,
         alignment: String = "auto",
         lineHeight: Double = 0,
@@ -419,8 +459,8 @@ final class PDFEngineClient {
             "--input", input.path,
             "--output", output.path,
             "--page", String(page),
-            "--rect", rect,
-            "--text", text,
+            "--rect=\(rect)",
+            "--text=\(text)",
             "--dest-x", String(destX),
             "--dest-y", String(destY)
         ]
@@ -439,6 +479,12 @@ final class PDFEngineClient {
         if italic {
             args.append("--italic")
         }
+        if noBold {
+            args.append("--no-bold")
+        }
+        if noItalic {
+            args.append("--no-italic")
+        }
         if underline {
             args.append("--underline")
         }
@@ -449,7 +495,7 @@ final class PDFEngineClient {
             args.append(contentsOf: ["--line-height", String(lineHeight)])
         }
         if let originalText, !originalText.isEmpty {
-            args.append(contentsOf: ["--original-text", originalText])
+            args.append(contentsOf: ["--original-text=\(originalText)"])
         }
         return try run(args)
     }
@@ -459,8 +505,8 @@ final class PDFEngineClient {
             "replace-text",
             "--input", input.path,
             "--output", output.path,
-            "--find", find,
-            "--replace", replacement,
+            "--find=\(find)",
+            "--replace=\(replacement)",
             "--auto-size",
             "--match-style"
         ]
@@ -468,7 +514,7 @@ final class PDFEngineClient {
             args.append(contentsOf: ["--page", String(page)])
         }
         if let rect, !rect.isEmpty {
-            args.append(contentsOf: ["--rect", rect])
+            args.append(contentsOf: ["--rect=\(rect)"])
         }
         return try run(args)
     }
@@ -478,8 +524,8 @@ final class PDFEngineClient {
             "redact-text",
             "--input", input.path,
             "--output", output.path,
-            "--find", find,
-            "--label", label
+            "--find=\(find)",
+            "--label=\(label)"
         ]
         if let pages, !pages.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             args.append(contentsOf: ["--pages", pages])
@@ -488,7 +534,7 @@ final class PDFEngineClient {
             args.append(contentsOf: ["--page", String(page)])
         }
         if let rect, !rect.isEmpty {
-            args.append(contentsOf: ["--rect", rect])
+            args.append(contentsOf: ["--rect=\(rect)"])
         }
         return try run(args)
     }
@@ -516,7 +562,7 @@ final class PDFEngineClient {
             "--x", String(x),
             "--y", String(y),
             "--font-size", String(fontSize),
-            "--text", text,
+            "--text=\(text)",
             "--font", fontName,
             "--color", colorHex
         ]
@@ -541,10 +587,10 @@ final class PDFEngineClient {
             "--input", input.path,
             "--output", output.path,
             "--kind", kind.rawValue,
-            "--find", find
+            "--find=\(find)"
         ]
         if !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            args.append(contentsOf: ["--note", note])
+            args.append(contentsOf: ["--note=\(note)"])
         }
         if let pages, !pages.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             args.append(contentsOf: ["--pages", pages])
@@ -560,7 +606,7 @@ final class PDFEngineClient {
             "--page", String(page),
             "--x", String(x),
             "--y", String(y),
-            "--text", text
+            "--text=\(text)"
         ])
     }
 
@@ -574,7 +620,7 @@ final class PDFEngineClient {
             "--y", String(y),
             "--width", String(width),
             "--height", String(height),
-            "--text", text,
+            "--text=\(text)",
             "--font-size", String(fontSize)
         ])
     }
@@ -771,6 +817,22 @@ final class PDFEngineClient {
         process.standardError = stderr
 
         try process.run()
+        // Interactive text commands must never hang the app: a stuck engine
+        // would leave it "busy" forever and every later edit would be dropped.
+        // Long batch jobs (OCR, convert, compress) keep running unbounded.
+        let interactive: Set<String> = [
+            "replace-block", "move-block", "block-at", "page-blocks",
+            "replace-text", "block-background", "add-text", "redline",
+        ]
+        let timeoutFlag = TimeoutFlag()
+        if let command = sanitized.first, interactive.contains(command) {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 90) {
+                if process.isRunning {
+                    timeoutFlag.fired = true
+                    process.terminate()
+                }
+            }
+        }
         // Drain both pipes while the engine runs: waiting first deadlocks as
         // soon as a reply outgrows the pipe buffer (64 KB, e.g. page-blocks
         // on a long document) — the engine blocks writing, we block waiting.
@@ -788,6 +850,9 @@ final class PDFEngineClient {
         let err = String(data: errData, encoding: .utf8) ?? ""
         Self.logForQA(["=> status \(process.terminationStatus)", String(out.suffix(400)), String(err.suffix(600))])
 
+        if timeoutFlag.fired {
+            throw PDFEngineError.timedOut("The PDF engine took too long and was stopped. Your document wasn't changed.")
+        }
         guard process.terminationStatus == 0 else {
             throw PDFEngineError.commandFailed(
                 command: ([scriptURL.lastPathComponent] + args).joined(separator: " "),

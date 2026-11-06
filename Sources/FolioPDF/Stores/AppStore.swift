@@ -37,9 +37,11 @@ struct ColorRun: Codable, Equatable {
 struct ActiveTextBlock: Equatable {
     let page: Int              // 1-based
     let engineRect: CGRect     // top-origin page coordinates
-    /// Document revision this block was read from. A commit or move against
-    /// any other revision targets stale content and must be dropped.
-    let revision: Int
+    /// Document revision this block was read from. A commit against another
+    /// revision is rebased when only our own engine edit came in between
+    /// (the engine re-finds the paragraph by its original text), and dropped
+    /// after undo/redo/open, where the content may be entirely different.
+    var revision: Int
     /// Unique per click. Distinguishes a fresh selection of the same block
     /// from a SwiftUI re-render of the old one, and lets commit/cancel/move
     /// callbacks target exactly the selection they were opened for.
@@ -73,6 +75,12 @@ struct ActiveTextBlock: Equatable {
     /// the replacement text must reflow into (engine coords), which is NOT the
     /// block's original rect. nil = never resized, render into `engineRect`.
     var resizedEngineRect: CGRect?
+    /// Text the editor opens with instead of `originalText`: a draft restored
+    /// after a failed commit, so the user's typing is never lost.
+    var initialText: String?
+    /// `colorRuns` were read from the editor's text at commit (authoritative
+    /// over the per-selection style snapshot, whose offsets predate typing).
+    var colorRunsFromEditor = false
 
     /// A resize alone is a real edit — the paragraph has to re-wrap even when
     /// neither the text nor the style changed.
@@ -84,6 +92,58 @@ struct ActiveTextBlock: Equatable {
             || underline || alignment != "auto"
             || fontFamily != nil || backgroundHex != nil
             || !colorRuns.isEmpty
+    }
+
+    // Per-attribute overrides sent to the engine. Each is sent ONLY when that
+    // exact attribute changed: any override (even one equal to the original,
+    // like --bold on an already-bold paragraph) turns off the engine's
+    // keep-every-line-in-place path and re-lays the whole paragraph, which
+    // visibly moves text the user never touched.
+    var fontSizeOverride: Double { abs(fontSize - originalFontSize) > 0.01 ? fontSize : 0 }
+    var colorOverride: String? {
+        colorHex.caseInsensitiveCompare(originalColorHex) == .orderedSame ? nil : colorHex
+    }
+    /// Turn bold/italic ON (the original wasn't).
+    var addsBold: Bool { bold && !originalBold }
+    var addsItalic: Bool { italic && !originalItalic }
+    /// Turn bold/italic OFF (the original was).
+    var removesBold: Bool { !bold && originalBold }
+    var removesItalic: Bool { !italic && originalItalic }
+
+    /// Colour runs for the engine: the editor's offsets are UTF-16 into the
+    /// RAW typed text; Python indexes code points of the NORMALIZED text.
+    /// Converting both keeps colours on the right words around emoji and
+    /// pasted "\r\n".
+    static func engineColorRunsJSON(_ runs: [ColorRun], rawText: String) -> String? {
+        guard !runs.isEmpty else { return nil }
+        let utf16 = rawText.utf16
+        func codePointOffset(_ offset: Int) -> Int {
+            var u = max(0, min(offset, utf16.count))
+            var index = utf16.index(utf16.startIndex, offsetBy: u)
+            // Inside a surrogate pair: step back to the scalar's start.
+            while u > 0, index.samePosition(in: rawText.unicodeScalars) == nil {
+                u -= 1
+                index = utf16.index(utf16.startIndex, offsetBy: u)
+            }
+            return normalizedLineBreaks(String(rawText[..<index])).unicodeScalars.count
+        }
+        let converted: [ColorRun] = runs.compactMap { run in
+            let start = codePointOffset(run.start)
+            let end = codePointOffset(run.start + run.length)
+            return end > start ? ColorRun(start: start, length: end - start, hex: run.hex) : nil
+        }
+        guard !converted.isEmpty else { return nil }
+        return (try? JSONEncoder().encode(converted)).flatMap { String(data: $0, encoding: .utf8) }
+    }
+
+    /// Editor text with every line-break flavour folded to "\n". NSTextView
+    /// keeps pasted "\r\n"/"\r" and Ctrl-Return's U+2028 as-is; the engine
+    /// only splits lines on "\n" and renders the others as "?".
+    static func normalizedLineBreaks(_ text: String) -> String {
+        text.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{2028}", with: "\n")
+            .replacingOccurrences(of: "\u{2029}", with: "\n")
     }
 
     var engineRectString: String {
@@ -180,6 +240,17 @@ final class AppStore: ObservableObject {
     @Published var pageCount: Int = 0
     /// Bumped on every document mutation so views re-render even when the
     /// PDFDocument instance is mutated in place (reorder, rotate, annotate).
+    /// Edits that arrived while the engine was busy, run in order afterwards
+    /// (dropping them lost the user's typing).
+    private var queuedEngineWork: [() -> Void] = []
+    /// A save requested while an edit was still being applied.
+    private var saveWhenIdle = false
+    /// True when the last document swap was our own engine edit, so a commit
+    /// typed against the previous version can be rebased onto this one.
+    private var rebaseAllowed = true
+    /// A failed edit's text, re-opened in the editor if the paragraph is
+    /// still there (else copied to the clipboard).
+    private var pendingDraftRestore: (page: Int, originalText: String, text: String)?
     @Published var documentRevision: Int = 0 {
         didSet {
             if selectedOperation == .edit, selectedEditTool == .image { refreshCanvasImages() }
@@ -563,6 +634,8 @@ final class AppStore: ObservableObject {
             pageCount = document?.pageCount ?? 0
             selectedEditTool = .contentText
             selectedPageIndices = []
+            rebaseAllowed = false
+            queuedEngineWork = []
             documentRevision += 1
             clearCanvasSelection()
             refreshHistoryState()
@@ -609,7 +682,20 @@ final class AppStore: ObservableObject {
     }
 
     func save() {
-        guard let session, !busy else { return }
+        guard let session else { return }
+        // Typing in an open editor is applied first (an engine op), then the
+        // save runs once every queued edit is done — never a file without it.
+        if let view = pdfViewProxy.pdfView as? PDFPreviewView.EditingPDFView,
+           view.liveEditorHasChanges {
+            saveWhenIdle = true
+            view.commitLiveEditors()
+            return
+        }
+        guard !busy else {
+            saveWhenIdle = true
+            toast("Saving after \(busyTitle) finishes")
+            return
+        }
         // A freshly merged document has no real home yet — pick one.
         if isStagedMergeDocument {
             saveAs()
@@ -650,11 +736,27 @@ final class AppStore: ObservableObject {
 
     // MARK: - Undo / Redo
 
+    /// ⌘Z / ⇧⌘Z while typing: apply the typing (it becomes the newest
+    /// version) rather than undo underneath it and drop it. Returns true when
+    /// the keystroke was spent on that.
+    private func applyTypingInsteadOfHistory() -> Bool {
+        guard let view = pdfViewProxy.pdfView as? PDFPreviewView.EditingPDFView else { return false }
+        if view.liveEditorHasChanges {
+            view.commitLiveEditors()
+            toast("Applied your typing — press ⌘Z again to undo it")
+            return true
+        }
+        view.commitLiveEditors()   // unchanged: just closes the editor
+        return false
+    }
+
     func undo() {
         guard !busy else { return }
+        if applyTypingInsteadOfHistory() { return }
         flushDocumentIfNeeded()
         guard let session, let url = session.undo() else { return }
         let position = captureScrollPosition()
+        rebaseAllowed = false
         document = PDFDocument(url: url)
         pageCount = document?.pageCount ?? 0
         documentRevision += 1
@@ -667,8 +769,10 @@ final class AppStore: ObservableObject {
 
     func redo() {
         guard !busy else { return }
+        if applyTypingInsteadOfHistory() { return }
         guard let session, let url = session.redo() else { return }
         let position = captureScrollPosition()
+        rebaseAllowed = false
         document = PDFDocument(url: url)
         pageCount = document?.pageCount ?? 0
         documentRevision += 1
@@ -1206,18 +1310,39 @@ final class AppStore: ObservableObject {
 
     private func openBlock(from blocks: [PDFEngineClient.EngineBlockPayload], page: Int, x: Double, y: Double) {
         guard selectedOperation == .edit, selectedEditTool == .contentText, !busy else { return }
+        // On a /Rotate page the editor overlay and move math aren't mapped
+        // through the rotation yet: the box would sit sideways and a drop
+        // would land a block-height off. Refuse rather than misplace text.
+        if let pdfPage = document?.page(at: page - 1), ((pdfPage.rotation % 360) + 360) % 360 != 0 {
+            toast("Text on rotated pages can't be edited yet — rotate the page upright first")
+            return
+        }
+        // A click INSIDE several blocks (a heading box overlapping a column)
+        // picks the smallest, like the engine's own block-at; a click near but
+        // outside text picks the nearest block within 8pt. Anything further is
+        // empty canvas, so a click beside text can start a new text box.
         var chosen: PDFEngineClient.EngineBlockPayload?
         var bestDistance = Double.greatestFiniteMagnitude
+        var bestArea = Double.greatestFiniteMagnitude
         for block in blocks where block.rect.count == 4 {
             let dx = max(block.rect[0] - x, x - block.rect[2], 0)
             let dy = max(block.rect[1] - y, y - block.rect[3], 0)
             let distance = dx * dx + dy * dy
-            if distance < bestDistance {
+            let area = max(0, block.rect[2] - block.rect[0]) * max(0, block.rect[3] - block.rect[1])
+            if distance < bestDistance || (distance == 0 && bestDistance == 0 && area < bestArea) {
                 bestDistance = distance
+                bestArea = area
                 chosen = block
             }
         }
-        guard let block = chosen, bestDistance <= 900 else { // within ~30pt
+        guard let block = chosen, bestDistance <= 64 else { // within 8pt
+            if let pending = pendingDraftRestore {
+                pendingDraftRestore = nil
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(pending.text, forType: .string)
+                toast("Your edit wasn't applied — your text was copied to the clipboard")
+                return
+            }
             // Clicking empty space while an editor is open just dismisses it
             // (the editor's own resign-first-responder commits). Spawning a
             // new text box on that same click would also nil the selection
@@ -1264,6 +1389,19 @@ final class AppStore: ObservableObject {
             fontFamily: nil,
             backgroundHex: nil
         )
+        // Re-opening after a failed edit: hand the typing back, but only into
+        // the SAME paragraph (matched by its text), never a neighbour.
+        if let pending = pendingDraftRestore {
+            pendingDraftRestore = nil
+            if pending.page == page, pending.originalText == block.text {
+                activeBlock?.initialText = pending.text
+                toast("Your edit wasn't applied — your text is back in the editor")
+            } else {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(pending.text, forType: .string)
+                toast("Your edit wasn't applied — your text was copied to the clipboard")
+            }
+        }
     }
 
     /// Commit an edit for EXACTLY the block whose editor closed. The block
@@ -1271,9 +1409,22 @@ final class AppStore: ObservableObject {
     /// hop — by then the user may already have clicked a different
     /// paragraph, and reading `activeBlock` here would commit the old text
     /// into the new block's rect (and tear down its editor mid-typing).
-    func commitBlockEdit(block: ActiveTextBlock, newText: String) {
+    func commitBlockEdit(block: ActiveTextBlock, newText rawText: String) {
+        let newText = ActiveTextBlock.normalizedLineBreaks(rawText)
         editorLog.info("store.commitBlockEdit sel=\(block.selectionID) text=\(String(newText.prefix(30)))")
-        guard selectedOperation == .edit, selectedEditTool == .contentText else { return }
+        // The payload names an explicit block, so the commit is valid even if
+        // the user already switched tool or mode (that switch is what closed
+        // the editor); bailing here silently dropped their typing.
+        guard document != nil else { return }
+        // Another edit is still being applied: run this one right after it
+        // instead of dropping it with a "Wait for…" toast.
+        if busy {
+            editorLog.info("commitBlockEdit QUEUED behind \(self.busyTitle)")
+            queuedEngineWork.append { [weak self] in
+                self?.commitBlockEdit(block: block, newText: rawText)
+            }
+            return
+        }
         var block = block
         // The payload identifies WHICH block; the style panel edits are kept
         // in blockStyleBySelection (by selectionID) so they survive activeBlock
@@ -1287,7 +1438,9 @@ final class AppStore: ObservableObject {
             block.alignment = style.alignment
             block.fontFamily = style.fontFamily
             block.backgroundHex = style.backgroundHex
-            block.colorRuns = style.colorRuns
+            if !block.colorRunsFromEditor {
+                block.colorRuns = style.colorRuns
+            }
             // The editor's own payload is the authority on the dragged-out
             // frame; the snapshot only fills in when it carries nothing.
             block.resizedEngineRect = block.resizedEngineRect ?? style.resizedEngineRect
@@ -1296,10 +1449,24 @@ final class AppStore: ObservableObject {
         if activeBlock?.selectionID == block.selectionID {
             activeBlock = nil
         }
-        guard block.revision == documentRevision else {
-            editorLog.error("commitBlockEdit DROPPED: stale block rev \(block.revision) vs \(self.documentRevision)")
-            toast("Text changed underneath — click the paragraph again")
-            return
+        if block.revision != documentRevision {
+            if rebaseAllowed {
+                // Only our own edit came in between: the engine re-finds this
+                // paragraph by its original text near its rect, and refuses
+                // (rather than erasing the rect) if it moved or changed.
+                editorLog.info("commitBlockEdit REBASED rev \(block.revision) -> \(self.documentRevision)")
+                block.revision = documentRevision
+            } else {
+                editorLog.error("commitBlockEdit DROPPED: stale block rev \(block.revision) vs \(self.documentRevision)")
+                if newText != block.originalText {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(newText, forType: .string)
+                    toast("The page changed before your edit was applied — your text was copied to the clipboard")
+                } else {
+                    toast("Text changed underneath — click the paragraph again")
+                }
+                return
+            }
         }
         editorLog.info("commitBlockEdit MERGED italic=\(block.italic) under=\(block.underline) align=\(block.alignment) changed=\(block.styleChanged) textChanged=\(newText != block.originalText)")
         let textChanged = newText != block.originalText
@@ -1316,8 +1483,7 @@ final class AppStore: ObservableObject {
         let trackOriginal = (trackChanges && textChanged) ? block.originalText : nil
         // Serialize per-word color spans to a compact JSON array; only sent
         // when the user actually colored a sub-range.
-        let colorRunsJSON: String? = block.colorRuns.isEmpty ? nil
-            : (try? JSONEncoder().encode(block.colorRuns)).flatMap { String(data: $0, encoding: .utf8) }
+        let colorRunsJSON = ActiveTextBlock.engineColorRunsJSON(block.colorRuns, rawText: rawText)
         // "Reflow text below" (text style panel toggle); missing = on.
         let reflowBelow = UserDefaults.standard.object(forKey: Self.reflowBelowDefaultsKey) as? Bool ?? true
         let reflowBox = ReflowResultBox()
@@ -1343,6 +1509,10 @@ final class AppStore: ObservableObject {
                 x: displaced.engineRect.midX,
                 y: y
             )
+        }, onError: { [weak self] error in
+            // Never lose the typing: re-open the paragraph with the draft
+            // (if it is still there), else keep the text on the clipboard.
+            self?.restoreDraft(after: error, block: block, text: newText)
         }) { [engine] input, output in
             reflowBox.value = try engine.replaceBlock(
                 input: input,
@@ -1350,11 +1520,13 @@ final class AppStore: ObservableObject {
                 page: block.page,
                 rect: block.engineRectString,
                 text: newText,
-                fontSize: block.styleChanged ? block.fontSize : 0,
+                fontSize: block.fontSizeOverride,
                 fontFamily: block.fontFamily,
-                colorHex: block.styleChanged ? block.colorHex : nil,
-                bold: block.bold,
-                italic: block.italic,
+                colorHex: block.colorOverride,
+                bold: block.addsBold,
+                italic: block.addsItalic,
+                noBold: block.removesBold,
+                noItalic: block.removesItalic,
                 underline: block.underline,
                 alignment: block.alignment,
                 background: block.backgroundHex,
@@ -1365,6 +1537,20 @@ final class AppStore: ObservableObject {
                 renderRect: block.resizedEngineRectString,
                 reflow: reflowBelow
             ).reflow
+        }
+    }
+
+    /// A text edit failed: explain why and give the typing back.
+    private func restoreDraft(after error: Error, block: ActiveTextBlock, text: String) {
+        report(error, while: "Edit Text")
+        guard text != block.originalText else { return }
+        if selectedOperation == .edit, selectedEditTool == .contentText {
+            pendingDraftRestore = (page: block.page, originalText: block.originalText, text: text)
+            editBlock(page: block.page, x: block.engineRect.midX, y: block.engineRect.midY)
+        } else {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            toast("Your text was copied to the clipboard")
         }
     }
 
@@ -1448,9 +1634,16 @@ final class AppStore: ObservableObject {
     /// own text (per-line styles preserved), never neighboring content, and
     /// lands exactly at the drop point. Any text typed in the editor before
     /// dragging is carried along.
-    func moveActiveBlock(block: ActiveTextBlock, text: String, toEngineX x: Double, y: Double) {
+    func moveActiveBlock(block: ActiveTextBlock, text rawText: String, toEngineX x: Double, y: Double) {
+        let text = ActiveTextBlock.normalizedLineBreaks(rawText)
         editorLog.info("store.moveActiveBlock sel=\(block.selectionID) dest=(\(x), \(y)) text=\(String(text.prefix(30)))")
         guard selectedOperation == .edit, selectedEditTool == .contentText else { return }
+        if busy {
+            queuedEngineWork.append { [weak self] in
+                self?.moveActiveBlock(block: block, text: rawText, toEngineX: x, y: y)
+            }
+            return
+        }
         var block = block
         if let style = blockStyleBySelection[block.selectionID] {
             block.fontSize = style.fontSize
@@ -1467,10 +1660,13 @@ final class AppStore: ObservableObject {
         if activeBlock?.selectionID == block.selectionID {
             activeBlock = nil
         }
-        guard block.revision == documentRevision else {
-            editorLog.error("moveActiveBlock DROPPED: stale block rev \(block.revision) vs \(self.documentRevision)")
-            toast("Text changed underneath — click the paragraph again")
-            return
+        if block.revision != documentRevision {
+            guard rebaseAllowed else {
+                editorLog.error("moveActiveBlock DROPPED: stale block rev \(block.revision) vs \(self.documentRevision)")
+                toast("Text changed underneath — click the paragraph again")
+                return
+            }
+            block.revision = documentRevision
         }
         let moveText = text.isEmpty ? block.originalText : text
         runEngineOp(title: "Move Text") { [engine] input, output in
@@ -1482,11 +1678,13 @@ final class AppStore: ObservableObject {
                 text: moveText,
                 destX: x,
                 destY: y,
-                fontSize: block.styleChanged ? block.fontSize : 0,
+                fontSize: block.fontSizeOverride,
                 fontFamily: block.fontFamily,
-                colorHex: block.styleChanged ? block.colorHex : nil,
-                bold: block.styleChanged && block.bold,
-                italic: block.italic,
+                colorHex: block.colorOverride,
+                bold: block.addsBold,
+                italic: block.addsItalic,
+                noBold: block.removesBold,
+                noItalic: block.removesItalic,
                 underline: block.underline,
                 alignment: block.alignment,
                 lineHeight: block.lineHeight,
@@ -2047,7 +2245,8 @@ final class AppStore: ObservableObject {
     /// Run an engine command from the current version into the next version.
     /// `title` names the action (busy pill, "<title> failed."); `success` is
     /// the toast shown when it finishes (defaults to `title`).
-    func runEngineOp(title: String, success: String? = nil, onDone: (() -> Void)? = nil, work: @escaping (URL, URL) throws -> Void) {
+    func runEngineOp(title: String, success: String? = nil, onDone: (() -> Void)? = nil,
+                     onError: ((Error) -> Void)? = nil, work: @escaping (URL, URL) throws -> Void) {
         guard let session else {
             toast("Open a PDF first")
             return
@@ -2069,6 +2268,9 @@ final class AppStore: ObservableObject {
                     self.busy = false
                     session.commit(output)
                     let position = self.captureScrollPosition()
+                    // Our own edit: a commit typed against the previous
+                    // version may be rebased onto this one.
+                    self.rebaseAllowed = true
                     self.document = PDFDocument(url: output)
                     self.pageCount = self.document?.pageCount ?? 0
                     self.documentRevision += 1
@@ -2077,13 +2279,35 @@ final class AppStore: ObservableObject {
                     self.restoreScrollPosition(position)
                     self.toast(success ?? title)
                     onDone?()
+                    self.drainQueuedEngineWork()
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self?.busy = false
-                    self?.report(error, while: title)
+                    guard let self else { return }
+                    self.busy = false
+                    if let onError {
+                        onError(error)
+                    } else {
+                        self.report(error, while: title)
+                    }
+                    self.drainQueuedEngineWork()
                 }
             }
+        }
+    }
+
+    /// Run the next edit that arrived while the engine was busy, then a save
+    /// that was waiting for all of them.
+    private func drainQueuedEngineWork() {
+        guard !busy else { return }
+        if !queuedEngineWork.isEmpty {
+            let next = queuedEngineWork.removeFirst()
+            DispatchQueue.main.async { next() }
+            return
+        }
+        if saveWhenIdle {
+            saveWhenIdle = false
+            DispatchQueue.main.async { [weak self] in self?.save() }
         }
     }
 
