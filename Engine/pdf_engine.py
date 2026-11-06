@@ -349,18 +349,27 @@ def resolve_replacement_font(doc: Any, page: Any, style: dict[str, Any], text: s
     """
     raw_name = style.get("rawfont") or ""
     if raw_name:
-        target = raw_name.lower()
+        wanted = strip_subset_prefix(raw_name).lower()
         try:
             fonts = page.get_fonts(full=False)
         except Exception:
             fonts = []
-        for entry in fonts:
+
+        def style_words(name: str) -> set[str]:
+            name = name.lower()
+            return {w for w in ("bold", "italic", "oblique", "black", "semibold", "demi", "light",
+                                "medium", "heavy", "condensed", "narrow") if w in name}
+
+        # The span's OWN font first: an exact name match. Only then a font
+        # whose name merely contains it ("Amasis MT Pro" inside "Amasis MT
+        # Pro,Bold"), and never one that adds a weight/style the span lacks —
+        # a substring match listed first turned regular text bold.
+        exact = [e for e in fonts if e[3] and strip_subset_prefix(e[3]).lower() == wanted]
+        similar = [e for e in fonts if e[3] and e not in exact
+                   and wanted in strip_subset_prefix(e[3]).lower()
+                   and style_words(strip_subset_prefix(e[3])) == style_words(wanted)]
+        for entry in exact + similar:
             xref, _ext, _ftype, basefont = entry[0], entry[1], entry[2], entry[3]
-            if not basefont:
-                continue
-            if strip_subset_prefix(basefont).lower() != strip_subset_prefix(raw_name).lower() \
-               and target not in basefont.lower():
-                continue
             try:
                 _name, ext, _t, buffer = doc.extract_font(xref)
             except Exception:
@@ -1912,7 +1921,10 @@ def _replay_ops(chars: list[dict[str, Any]], picker: FontPicker, dx: float = 0.0
 
 
 def _chars_exact(chars: list[dict[str, Any]], picker: FontPicker) -> bool:
-    spans = {id(c["span"]): c["span"] for c in chars}
+    # Whitespace never needs an exact glyph: a space is only drawn when its
+    # font has a distinct space glyph, otherwise extraction infers it from the
+    # gap. (A bullet's trailing space in a non-embedded font blocked replay.)
+    spans = {id(c["span"]): c["span"] for c in chars if c["c"].strip()}
     return (all(picker.exact(span.get("font") or "", _span_text(span)) for span in spans.values())
             and picker.unscaled(chars))
 
@@ -1943,29 +1955,60 @@ def plan_line_edit(line: dict[str, Any], new_text: str, picker: FontPicker, righ
     if not moving:
         while p < min(n_old, n_new) and old[p] == new_text[p]:
             p += 1
+    q = 0
+    while q < min(n_old, n_new) - p and old[n_old - 1 - q] == new_text[n_new - 1 - q]:
+        q += 1
+    # p/q are TEXT positions; a glyph can carry several characters (a "fi"
+    # ligature reads as "fi") or none. Snap both to whole glyphs: g_pre glyphs
+    # are untouched before the change, g_suf after it; a ligature straddling
+    # the change becomes part of the changed middle. (Indexing glyphs by text
+    # position shifted everything after a ligature: "high demand" -> "hemand".)
+    ends: list[int] = []
+    position = 0
+    for ch in chars:
+        position += len(ch["c"])
+        ends.append(position)
+    starts = [end - len(ch["c"]) for end, ch in zip(ends, chars)]
+    g_pre = sum(1 for end in ends if end <= p)
+    g_suf = sum(1 for begin in starts if begin >= n_old - q)
+    g_suf = min(g_suf, len(chars) - g_pre)
+    p = ends[g_pre - 1] if g_pre else 0
+    q = n_old - starts[len(chars) - g_suf] if g_suf else 0
+    g_mid_end = len(chars) - g_suf
     # An edited line is redrawn as ONE contiguous line in the content stream
     # (prefix, new text, suffix — the latter two after the former), else text
     # extraction / search / copy read "% discount -7". Only with the glyphs'
     # own fonts, so nothing changes visually.
-    whole_line = _chars_exact(chars, picker)
-    if 0 < p and (whole_line or _chars_exact(chars[:p], picker)):
-        # Keep the edited line ONE line in the text layer: the unchanged
-        # prefix is replayed exactly, right before the new text.
-        ops["erase"].extend(chars[:p])
-        ops["draw"].extend(_replay_ops(chars[:p], picker))
-    q = 0
-    while q < min(n_old, n_new) - p and old[n_old - 1 - q] == new_text[n_new - 1 - q]:
-        q += 1
+    # The line can be replayed exactly from `start` on: everything after the
+    # last glyph that can't be (a symbol-font bullet, a non-embedded font).
+    # Glyphs before it stay where they are.
+    start = 0
+    for index in range(len(chars) - 1, -1, -1):
+        ch = chars[index]
+        if ch["c"].strip() and not _chars_exact([ch], picker):
+            start = index + 1
+            break
+    if start:
+        # Glyphs left in place keep the whitespace right after them (a bullet
+        # and its space): erasing that space glued "" to the next word.
+        while start < g_pre and not chars[start]["c"].strip():
+            start += 1
+    whole_line = start <= g_pre and _chars_exact(chars[start:], picker)
+    if start < g_pre and whole_line:
+        # Keep the edited line ONE run in the text layer: the unchanged
+        # prefix (from `start`) is replayed exactly, right before the new text.
+        ops["erase"].extend(chars[start:g_pre])
+        ops["draw"].extend(_replay_ops(chars[start:g_pre], picker))
     middle_raw = new_text[p:n_new - q]
-    if p < n_old - q:
-        style_char = chars[p]
-    elif p > 0:
-        style_char = chars[p - 1]
+    if g_pre < g_mid_end:
+        style_char = chars[g_pre]
+    elif g_pre > 0:
+        style_char = chars[g_pre - 1]
     else:
         style_char = chars[0]
-    x = chars[p]["origin"][0] if p < n_old else chars[-1]["bbox"][2]
-    ops["erase"].extend(chars[p:n_old - q])
-    right = chars[p - 1]["bbox"][2] if p > 0 else x
+    x = chars[g_pre]["origin"][0] if g_pre < len(chars) else chars[-1]["bbox"][2]
+    ops["erase"].extend(chars[g_pre:g_mid_end])
+    right = chars[g_pre - 1]["bbox"][2] if g_pre > 0 else x
     if middle_raw.strip() or (middle_raw and q):
         span = style_char["span"]
         size = _span_size(span)
@@ -1975,7 +2018,7 @@ def plan_line_edit(line: dict[str, Any], new_text: str, picker: FontPicker, righ
         ops["draw"].append((x, y, middle, kwargs, size, pdf_color_to_rgb(span.get("color"))))
         x += width
         right = max(right, x)
-    suffix = chars[n_old - q:]
+    suffix = chars[g_mid_end:]
     if suffix:
         shift = x - float(suffix[0]["origin"][0])
         if abs(shift) < 0.02:
@@ -2083,6 +2126,29 @@ def minimal_block_edit(doc: Any, page: Any, block_lines: list[dict[str, Any]], n
     if any(line_char_list(line) is None for line in lines):
         return None
     picker = FontPicker(doc, page, scratch_files)
+
+    # Unchanged lines are replayed (for reading order) only when EVERY segment
+    # on their row can be replayed exactly: replaying half a row ("Know when
+    # to retire" but not a non-embedded "10-") splits it in the text layer.
+    row_keys: list[float] = []
+
+    def row_key(line: dict[str, Any]) -> float:
+        # Segments of one row can sit on slightly different baselines (mixed
+        # fonts): cluster within 1pt.
+        y = float(line["origin"][1])
+        for key in row_keys:
+            if abs(key - y) <= 1.0:
+                return key
+        row_keys.append(y)
+        return y
+
+    row_exact: dict[float, bool] = {}
+    for line in lines:
+        key = row_key(line)
+        row_exact[key] = row_exact.get(key, True) and _chars_exact(line_char_list(line) or [], picker)
+
+    def may_replay(line: dict[str, Any]) -> bool:
+        return row_exact.get(row_key(line), False)
     old_texts = [line["text"] for line in lines]
     new_lines = new_text.split("\n")
     if reverse:
@@ -2160,7 +2226,8 @@ def minimal_block_edit(doc: Any, page: Any, block_lines: list[dict[str, Any]], n
     plans = []
     pairwise_ok = True
     for offset, index in enumerate(old_mid[:len(new_mid)]):
-        plan = plan_line_edit(lines[index], new_mid[offset], picker, right_limit, is_justified(index), replay=True)
+        plan = plan_line_edit(lines[index], new_mid[offset], picker, right_limit, is_justified(index),
+                              replay=may_replay(lines[index]))
         if plan is None:
             pairwise_ok = False
             break
@@ -2249,7 +2316,7 @@ def minimal_block_edit(doc: Any, page: Any, block_lines: list[dict[str, Any]], n
         # Below a line-count change the identical lines move by whole pitches;
         # otherwise they are replayed in place (reading order, see replay).
         plan = plan_line_edit(lines[index], old_texts[index], picker, page_rect.x1, False,
-                              dy=dy if abs(dy) > 0.01 else 0.0, replay=True)
+                              dy=dy if abs(dy) > 0.01 else 0.0, replay=may_replay(lines[index]))
         if plan is None:
             return None
         erase.extend(plan["erase"])
@@ -2262,7 +2329,8 @@ def minimal_block_edit(doc: Any, page: Any, block_lines: list[dict[str, Any]], n
     head_erase: list[dict[str, Any]] = []
     head_draw: list[tuple] = []
     for index in range(0, k):
-        plan = plan_line_edit(lines[index], old_texts[index], picker, page_rect.x1, False, replay=True)
+        plan = plan_line_edit(lines[index], old_texts[index], picker, page_rect.x1, False,
+                              replay=may_replay(lines[index]))
         if plan is not None:
             head_erase.extend(plan["erase"])
             head_draw.extend(plan["draw"])
