@@ -71,14 +71,23 @@ extension AppStore {
 
     /// Spool the open document (or a page range of it) to the HP LaserJet
     /// driver and report the outcome from the driver log.
-    func printToLaserJet(options: LaserJetPrinter.Options, pageSpec: String) {
-        guard let document, let data = document.dataRepresentation() else { return }
+    /// `sourceFile` prints that PDF instead of the open document (e.g. the
+    /// driver's two-sided test sheet); `pageSpec` is then ignored.
+    func printToLaserJet(options: LaserJetPrinter.Options, pageSpec: String, sourceFile: URL? = nil) {
+        let data: Data
+        if let sourceFile {
+            guard let fileData = try? Data(contentsOf: sourceFile) else { return }
+            data = fileData
+        } else {
+            guard let document, let docData = document.dataRepresentation() else { return }
+            data = docData
+        }
         guard !busy else {
             toast("Wait for \(busyTitle) to finish")
             return
         }
         let engine = self.engine
-        let name = documentName
+        let name = sourceFile == nil ? documentName : "the test sheet"
         busy = true
         busyTitle = "Sending to printer"
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -91,10 +100,17 @@ extension AppStore {
                 try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
                 var source = temp.appendingPathComponent("full.pdf")
                 try data.write(to: source)
-                if pageSpec != "all" {
+                if pageSpec != "all" && sourceFile == nil {
                     let subset = temp.appendingPathComponent("pages.pdf")
                     _ = try engine.extractPages(input: source, output: subset, pages: pageSpec)
                     source = subset
+                }
+                // Pages per sheet / booklet: laid out here, on the chosen
+                // paper, after the page range so both combine.
+                if options.layout != .one {
+                    let imposed = temp.appendingPathComponent("layout.pdf")
+                    try PrintImposition.impose(input: source, output: imposed, layout: options.layout, paper: options.paper)
+                    source = imposed
                 }
                 offset = LaserJetPrinter.logOffset()
                 job = try LaserJetPrinter.submit(pdf: source, options: options)
@@ -117,7 +133,7 @@ extension AppStore {
                 switch outcome {
                 case .printed:
                     self?.toast(options.twoSided
-                        ? "Front sides sent — when they finish, follow the prompt to put the stack back in"
+                        ? "Front sides sent — when they finish, a prompt shows how to put the stack back in"
                         : "Sent to HP LaserJet ✓")
                 case .queuedNoPrinter:
                     self?.toast("Printer not connected — the job will print when it's plugged in")
@@ -125,6 +141,8 @@ extension AppStore {
                     self?.errorMessage = message
                 case .timedOut:
                     self?.toast("Still printing… check the printer")
+                case .portDisabled:
+                    self?.errorMessage = "macOS switched off the printer's USB port. Unplug the printer's USB cable and plug it back in — the job will print then."
                 }
             }
         }

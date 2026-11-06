@@ -16,6 +16,14 @@ enum LaserJetPrinter {
         /// Two-sided by hand (DUPLEX=manual): the driver prints the fronts,
         /// asks the user to flip the stack, then prints the backs reversed.
         var twoSided = false
+        /// Two-sided only: "long" (book) or "short" (notepad / booklet / 2-up).
+        var flip = "long"
+        /// Pages per sheet / booklet, done by Folio before spooling.
+        var layout: PrintLayout = .one
+        /// Percent; nil = fit to page (driver default, key omitted).
+        var scale: Int?
+        /// Uniform margin in points; nil/0 = none (key omitted).
+        var margin: Int?
     }
 
     struct Device {
@@ -31,6 +39,9 @@ enum LaserJetPrinter {
         /// app never resends on its own.
         case failed(String)
         case timedOut
+        /// macOS disabled the printer's USB port after enumeration failures;
+        /// only replugging the cable brings it back.
+        case portDisabled
     }
 
     static let spoolDirectory = FileManager.default.homeDirectoryForCurrentUser
@@ -89,6 +100,9 @@ enum LaserJetPrinter {
         if let density = options.density { lines.append("DENSITY=\(min(max(density, 1), 5))") }
         lines.append("ECONOMODE=\(options.economode ? "on" : "off")")
         lines.append("DUPLEX=\(options.twoSided ? "manual" : "none")")
+        if options.twoSided { lines.append("DUPLEX_FLIP=\(options.flip == "short" ? "short" : "long")") }
+        if let scale = options.scale, scale != 100 { lines.append("SCALE=\(min(max(scale, 25), 400))") }
+        if let margin = options.margin, margin > 0 { lines.append("MARGIN=\(margin)") }
         // Sidecar first so it's in place when the PDF's arrival wakes the watcher.
         try (lines.joined(separator: "\n") + "\n")
             .write(to: spoolDirectory.appendingPathComponent("job-\(stamp).opts"), atomically: true, encoding: .utf8)
@@ -107,9 +121,13 @@ enum LaserJetPrinter {
         var seenJob = false
         while Date() < deadline {
             if let text = logText(from: startOffset) {
+                var portDisabled = false
                 for line in text.split(separator: "\n") {
                     if line.contains(job.lastPathComponent) { seenJob = true }
-                    if line.contains("no supported printer detected") { return .queuedNoPrinter }
+                    if line.contains("usb port disabled") { portDisabled = true }
+                    if line.contains("no supported printer detected") {
+                        return portDisabled ? .portDisabled : .queuedNoPrinter
+                    }
                     guard seenJob else { continue }
                     if let range = line.range(of: "fwload exit ") {
                         let code = line[range.upperBound...].prefix { $0.isNumber }
